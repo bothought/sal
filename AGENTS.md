@@ -65,6 +65,7 @@ design/features/          what hal does — one folder per feature item
   context-management/     the context indicator and compaction
 design/technical/         how hal is built — one folder per technical item
   architecture/           the current technical architecture
+  context-compaction/     how context-management is built
 ```
 
 Each item is a folder whose `README.md` is its entry point; supporting notes or

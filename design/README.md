@@ -17,6 +17,7 @@ design/
     context-management/      the context indicator and compaction
   technical/                 how hal is built
     architecture/            the current technical architecture
+    context-compaction/      the technical design of context-management
 ```
 
 The split is strict: a **feature** document answers "what does the user get, and
@@ -59,7 +60,7 @@ further approval step of its own.
 | Item | Scope |
 |---|---|
 | [architecture](technical/architecture/README.md) | Package layout, the interfaces between packages, concurrency, data formats, configuration resolution, retry policy, and the testing strategy. |
-| context-compaction *(not written yet)* | The technical design of `features/context-management`: limit discovery, token estimation, the threshold check in the agent loop, the compaction entry in the JSONL format, and how the front ends render the new state. |
+| [context-compaction](technical/context-compaction/README.md) | The technical design of `features/context-management`: limit discovery, token estimation, the threshold check in the agent loop, the compaction entry in the JSONL format, and how the front ends render the new state. |
 
 The index lists every item, written or not. An item whose document does not
 exist yet is marked *(not written yet)*, so a gap is visible rather than silently
