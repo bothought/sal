@@ -62,7 +62,7 @@ built" never mix:
 design/README.md          index of the design docs and the folder conventions
 design/features/          what hal does — one folder per feature item
   basic-functions/        the current feature set, described coarse to fine
-  context-management/     proposed: context indicator and compaction
+  context-management/     the context indicator and compaction
 design/technical/         how hal is built — one folder per technical item
   architecture/           the current technical architecture
 ```
@@ -73,27 +73,28 @@ folders and listed in the parent index. Feature items and technical items are
 never merged into one document, and two unrelated feature (or technical) items
 are never merged into one folder.
 
+Design work and the code implementing it can share one branch, but the document
+is committed before the code that depends on it. Merging is the review: a
+document on `main` is a document to implement, and the code implementing it needs
+no further approval step of its own.
+
 ### Rules for AI agents
 
-- **`design/` is read-only.** Unless the developer explicitly asks for a change
-  inside `design/`, an agent must not create, edit, move or delete anything
-  under `design/`. The documents there are written and maintained by people;
-  agents read them and implement against them. If a design doc looks wrong or
-  incomplete, say so in the response instead of editing it.
+- **`design/` is written by the developer.** An agent writes under `design/` only
+  when the task asks for it; otherwise the documents are read-only, and a
+  document that looks wrong or incomplete is reported in the response instead of
+  being edited. Documents are never changed on the agent's own initiative.
 - **Code follows design.** Every behaviour in the code must be described by some
   document under `design/`. When a design doc is added or changed, the matching
   code change belongs to the same piece of work, so the two never drift apart.
 - **Nothing that design does not describe.** Do not implement a feature, flag,
   setting, tool, or mode that the design documents do not mention. If the code
-  needs new behaviour, the design has to describe it first — ask the developer
-  to write that down rather than inventing it.
-- **Design changes are not commits the agent makes.** An agent may propose a
-  design change in prose or in the task's response; writing it into `design/`
-  is the developer's job.
-- **A proposed document is not a licence to build.** An item marked *proposed* or
-  *not written yet* describes work the developer has not approved. The feature is
-  implemented only after the developer says so, and only once the technical
-  document it depends on exists too.
+  needs new behaviour, the design has to describe it first.
+- **Commit the document first.** Design work and the code that implements it can
+  share one branch, but the document is committed before the code that depends on
+  it, so the code in a change is always backed by a document that already exists.
+  Merging is the review: a document on `main` is a document to implement, and the
+  code implementing it needs no further approval step of its own.
 
 Because hal itself loads `AGENTS.md` (and `CLAUDE.md`) as context files, this
 file is also the instruction set an agent run by hal reads from its own working

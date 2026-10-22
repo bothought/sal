@@ -1,10 +1,5 @@
 # Context management
 
-Status: **proposed — not implemented.** This document describes behaviour hal
-does not have yet. Until it is implemented, `design/features/basic-functions`
-remains an accurate description of the program, including its statement that
-context-window tracking is absent.
-
 This item covers two related capabilities:
 
 1. **A context indicator** — how much of the model's context window the current
@@ -17,7 +12,8 @@ Both belong to one feature because they answer one question — "how much room i
 left, and what happens when it runs out" — and because the indicator is what
 tells the user when compaction happened and what it saved. How the two are
 implemented (measurement, model-limit discovery, the stored format of a
-compaction) belongs to a technical document, which does not exist yet; see §8.
+compaction) belongs to the technical item
+`design/technical/context-compaction`.
 
 ## 1. Purpose
 
@@ -497,10 +493,10 @@ Not part of this feature, and not to be added by implementing it:
 - **Automatic model switching** to a larger-window model when the context fills.
 - **Rewriting the visible transcript** on compaction.
 
-## 8. Impact on the existing design, once implemented
+## 8. What this changes in the existing documents
 
-When this is implemented, `design/features/basic-functions` changes in these
-places, and this document is the reference for the new text:
+Implementing this changes `design/features/basic-functions` in these places, and
+this document is the reference for the new text:
 
 - §2 (the agent loop) notes that a request may be preceded by a compaction, and
   that §2.5's retry policy covers the summarization request too.
@@ -517,10 +513,8 @@ places, and this document is the reference for the new text:
 - The README gains the same surface: the footer description, the two commands,
   the three settings, and a section on compaction; the CHANGELOG gets one entry.
 
-The matching technical design — how the limit is discovered and cached, how the
-estimate is computed and corrected, where the threshold check sits in the agent
-loop, how a compaction entry is represented in the JSONL format, and how the
-front ends render the new state — is a separate technical item, written before
-the code. Nothing in this document can be implemented without it, since the
-feature touches the agent loop, the provider layer, the session format, and both
-front ends at once.
+The technical side — how the limit is discovered and cached, how the estimate is
+computed and corrected, where the threshold check sits in the agent loop, how a
+compaction entry is represented in the JSONL format, and how the front ends
+render the new state — belongs to `design/technical/context-compaction`, which
+is written before the code that depends on it.

@@ -14,7 +14,7 @@ rest of the working agreements.
 design/
   features/                  what hal does
     basic-functions/         the current feature set, coarse to fine
-    context-management/      proposed: context indicator and compaction
+    context-management/      the context indicator and compaction
   technical/                 how hal is built
     architecture/            the current technical architecture
 ```
@@ -22,7 +22,8 @@ design/
 The split is strict: a **feature** document answers "what does the user get, and
 what does it do", a **technical** document answers "how is that implemented".
 Both are written from coarse to fine — an overview first, then the parts, then
-the details that matter to whoever changes the code.
+the details that matter to whoever changes the code. A document describes the
+design as it stands; it is not annotated with whether the code has caught up.
 
 Each item is one folder, and its `README.md` is the entry point:
 
@@ -34,9 +35,15 @@ Each item is one folder, and its `README.md` is the entry point:
 - Adding an item means adding a folder and a line to the index below.
 
 A feature item and its technical counterpart are two folders, never one: the
-feature document states what happens, the technical document how. A proposed
-feature is listed in the index with its status, and so is the technical document
-it still needs.
+feature document states what happens, the technical document how. The two are
+separate pieces of work — a feature can be described before the technical design
+that implements it exists — so the index names both and marks the one that is
+still missing.
+
+Design work and the code implementing it can share a branch, but the document is
+committed before the code that depends on it. Merging is the review: a document
+on `main` is a document to implement, and the code that implements it needs no
+further approval step of its own.
 
 ## Index
 
@@ -45,16 +52,15 @@ it still needs.
 | Item | Scope |
 |---|---|
 | [basic-functions](features/basic-functions/README.md) | Everything hal currently does: the agent loop, the tools, the four interfaces, sessions, configuration, and the guardrails around them. |
-| [context-management](features/context-management/README.md) | **Proposed, not implemented.** A context-window indicator (used / limit) and compaction: automatic when the window fills, or on `/compact`. |
+| [context-management](features/context-management/README.md) | The context window: a `used / limit` indicator, and compaction of older messages, automatic when the window fills or on `/compact`. |
 
 ### Technical
 
 | Item | Scope |
 |---|---|
 | [architecture](technical/architecture/README.md) | Package layout, the interfaces between packages, concurrency, data formats, configuration resolution, retry policy, and the testing strategy. |
-| context-compaction *(not written yet)* | The technical design of `features/context-management`: limit discovery, token estimation, the threshold check in the agent loop, the compaction entry in the JSONL format, and how the front ends render the new state. Required before that feature can be implemented. |
+| context-compaction *(not written yet)* | The technical design of `features/context-management`: limit discovery, token estimation, the threshold check in the agent loop, the compaction entry in the JSONL format, and how the front ends render the new state. |
 
-The index above lists only items that exist today. When a new item is designed
-but not yet written, it is listed in the index of the subtree it belongs to with
-an explicit "not written yet" note, so a gap is visible rather than silently
+The index lists every item, written or not. An item whose document does not
+exist yet is marked *(not written yet)*, so a gap is visible rather than silently
 missing.
