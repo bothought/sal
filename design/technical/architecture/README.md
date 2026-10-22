@@ -1,7 +1,5 @@
 # Architecture
 
-Status: current implementation (hal 0.1.0).
-
 This document is the technical description of hal: how the program is put
 together. It is written coarse to fine — package layout first, then the
 interfaces between packages, then the details of concurrency, data formats and

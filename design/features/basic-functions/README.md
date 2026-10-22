@@ -1,11 +1,9 @@
 # Basic functions
 
-Status: current implementation (hal 0.1.0).
-
-This document is the feature specification of hal as it exists today: what the
-program does, from the outside in. It is written coarse to fine — the overview
-first, then each area, then the detail that matters to a user or to whoever
-tests the behaviour. It says nothing about how any of it is implemented; that is
+This document is the feature specification of hal: what the program does, from
+the outside in. It is written coarse to fine — the overview first, then each
+area, then the detail that matters to a user or to whoever tests the behaviour.
+It says nothing about how any of it is implemented; that is
 `design/technical/architecture`.
 
 ## 1. Overview
