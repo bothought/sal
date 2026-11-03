@@ -74,6 +74,26 @@ folders and listed in the parent index. Feature items and technical items are
 never merged into one document, and two unrelated feature (or technical) items
 are never merged into one folder.
 
+### How much detail each kind of document carries
+
+The two kinds are written at deliberately different depths:
+
+- **Feature documents are detailed, and written for the user.** They describe
+  every behaviour the program has: what is displayed, what each command and
+  setting does, what is stored, what happens on failure or interruption, and
+  what the edge cases are. The vocabulary is the interface's — commands,
+  settings, screens, files the user can see — never the code's. A feature
+  document should be complete enough that the behaviour can be checked against
+  it without reading the source, and the code is expected to match it exactly.
+- **Technical documents give the architecture, not the implementation.** They
+  say which parts the program is made of, what each part is responsible for, how
+  the parts fit together, what data flows between them, which invariants hold,
+  and why the structure is that way. They deliberately do not contain source
+  code, type or function names, or step-by-step algorithms: those belong in the
+  code and its doc comments. A change that only touches such internals needs no
+  document change; a change to the parts, their responsibilities, or an
+  invariant does.
+
 Design work and the code implementing it can share one branch, but the document
 is committed before the code that depends on it. Merging is the review: a
 document on `main` is a document to implement, and the code implementing it needs
@@ -88,6 +108,10 @@ no further approval step of its own.
 - **Code follows design.** Every behaviour in the code must be described by some
   document under `design/`. When a design doc is added or changed, the matching
   code change belongs to the same piece of work, so the two never drift apart.
+  When a feature document and the code disagree, the document wins and the code
+  is changed; when a technical document names an internal that the code has since
+  restructured, the document is the thing to correct, since internals are
+  described in the code itself.
 - **Nothing that design does not describe.** Do not implement a feature, flag,
   setting, tool, or mode that the design documents do not mention. If the code
   needs new behaviour, the design has to describe it first.
