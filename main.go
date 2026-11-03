@@ -36,33 +36,57 @@ import (
 const version = "0.1.0"
 
 type options struct {
-	printMode    bool
-	mode         string
-	cont         bool
-	contAll      bool
-	listSessions bool
-	sessionPath  string
-	sessionDir   string
-	noSession    bool
-	name         string
-	model        string
-	providerName string
-	apiKey       string
-	baseURL      string
-	toolList     string
-	noContext    bool
-	systemPrompt string
-	appendPrompt string
-	maxTurns     int
-	maxRetries   int
-	configPath   string
-	showConfig   bool
-	showVersion  bool
-	web          bool
-	webAddr      string
-	webToken     string
-	prompts      []string
-	files        []string
+	printMode     bool
+	mode          string
+	cont          bool
+	contAll       bool
+	listSessions  bool
+	sessionPath   string
+	sessionDir    string
+	noSession     bool
+	name          string
+	model         string
+	providerName  string
+	apiKey        string
+	baseURL       string
+	toolList      string
+	noContext     bool
+	systemPrompt  string
+	appendPrompt  string
+	maxTurns      int
+	maxRetries    int
+	contextWin    int
+	autoCompact   bool
+	noAutoCompact bool
+	compactAt     int
+	configPath    string
+	showConfig    bool
+	showVersion   bool
+	web           bool
+	webAddr       string
+	webToken      string
+	prompts       []string
+	files         []string
+}
+
+// sizeValue is a flag.Value that accepts a token count with an optional k/m
+// suffix, since that is how model windows are usually quoted ("128k", "1m").
+type sizeValue int
+
+func (v *sizeValue) String() string {
+	if v == nil {
+		return "0"
+	}
+	return fmt.Sprint(int(*v))
+}
+
+func (v *sizeValue) Set(s string) error {
+	n, err := config.ParseSize(s)
+	if err != nil {
+		return err
+	}
+	*v = sizeValue(n)
+	return nil
 }
 
 func main() {
@@ -153,6 +177,9 @@ func runWithArgs(args []string) error {
 		ag.MaxTurns = opts.maxTurns
 	}
 	ag.MaxRetries = opts.maxRetries
+	ag.ContextWindowOverride = opts.contextWin
+	ag.AutoCompact = opts.autoCompact
+	ag.CompactAt = opts.compactAt
 
 	// Sessions: JSONL files under the XDG data directory, unless --no-session.
 	var sess *session.Session
@@ -164,7 +191,8 @@ func runWithArgs(args []string) error {
 			if err != nil {
 				return fmt.Errorf("cannot load session %s: %w", opts.sessionPath, err)
 			}
-			ag.History = append([]agent.Message(nil), sess.Messages...)
+			ag.SetHistory(sess.Messages)
+			restoreCompaction(ag, sess)
 		case opts.contAll:
 			// --continue-all widens the search to sessions recorded for any
 			// project on this machine, which is what `-c --list` style switching
@@ -183,7 +211,8 @@ func runWithArgs(args []string) error {
 				if err != nil {
 					return fmt.Errorf("cannot load session %s: %w", latest, err)
 				}
-				ag.History = append([]agent.Message(nil), sess.Messages...)
+				ag.SetHistory(sess.Messages)
+				restoreCompaction(ag, sess)
 			}
 		case opts.cont:
 			// Continuing with nothing stored yet starts a fresh session instead of
@@ -202,7 +231,8 @@ func runWithArgs(args []string) error {
 				if err != nil {
 					return fmt.Errorf("cannot load session %s: %w", latest, err)
 				}
-				ag.History = append([]agent.Message(nil), sess.Messages...)
+				ag.SetHistory(sess.Messages)
+				restoreCompaction(ag, sess)
 			}
 		default:
 			sess, err = session.New(root, cwd, opts.name, prov.ModelName())
@@ -212,6 +242,16 @@ func runWithArgs(args []string) error {
 		}
 		ag.OnMessage = func(m agent.Message) {
 			if err := sess.AppendMessage(m); err != nil {
+				fmt.Fprintln(os.Stderr, "hal: session write failed: "+err.Error())
+			}
+		}
+		ag.OnCompaction = func(c agent.Compacted) {
+			if err := sess.AppendCompaction(session.Compaction{
+				Summary:      c.Summary,
+				Messages:     c.Messages,
+				Shortened:    c.Shortened,
+				ShortenedIDs: sess.MessageIDs(c.ShortenedIndexes),
+			}, sess.MessageID(c.Through)); err != nil {
 				fmt.Fprintln(os.Stderr, "hal: session write failed: "+err.Error())
 			}
 		}
@@ -278,6 +318,10 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 	fs.StringVar(&o.appendPrompt, "append-system-prompt", "", "append text to the system prompt")
 	fs.IntVar(&o.maxTurns, "max-turns", 32, "maximum agent turns per prompt")
 	fs.IntVar(&o.maxRetries, "max-retries", agent.DefaultMaxRetries, "retries for a transient provider failure (negative disables)")
+	fs.Var((*sizeValue)(&o.contextWin), "context-window", "context window in tokens (0 = resolve it; accepts 128k, 1m)")
+	fs.BoolVar(&o.autoCompact, "auto-compact", true, "compact older messages when the context window fills")
+	fs.BoolVar(&o.noAutoCompact, "no-auto-compact", false, "never compact automatically")
+	fs.IntVar(&o.compactAt, "compact-at", agent.DefaultCompactAt, "percentage of the context window at which automatic compaction runs")
 	fs.StringVar(&o.configPath, "config", "", "configuration file (default $XDG_CONFIG_HOME/hal/config.toml)")
 	fs.BoolVar(&o.showConfig, "show-config", false, "print the resolved configuration and exit")
 	fs.BoolVar(&o.showVersion, "v", false, "print version and exit")
@@ -291,6 +335,12 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	// --no-auto-compact is the negative of --auto-compact; resolving it here
+	// keeps both flags reading the same value without registering two
+	// variables on one field (which would reset the default).
+	if o.noAutoCompact {
+		o.autoCompact = false
+	}
 
 	for _, a := range fs.Args() {
 		if strings.HasPrefix(a, "@") && len(a) > 1 {
@@ -337,6 +387,12 @@ func newRunID() string {
 func validateResolved(o options) error {
 	if o.providerName != "" && !strings.EqualFold(o.providerName, "openai") {
 		return fmt.Errorf("only the openai provider is bundled in hal (got %q); set provider = \"openai\"", o.providerName)
+	}
+	if o.contextWin < 0 {
+		return fmt.Errorf("context_window must not be negative (got %d)", o.contextWin)
+	}
+	if o.compactAt < 1 || o.compactAt > 100 {
+		return fmt.Errorf("compact_at must be between 1 and 100 (got %d)", o.compactAt)
 	}
 	return nil
 }
@@ -432,6 +488,18 @@ func resolveOptions(o options, set map[string]bool, cfg config.Loaded) (options,
 	} else {
 		sources = append(sources, settingSource{"max_retries", fmt.Sprint(agent.DefaultMaxRetries), "default"})
 	}
+	// The context window is read raw: 0 means "resolve it", so it must not be
+	// mistaken for a value that was set.
+	if anyFlagSet(set, "context-window") {
+		sources = append(sources, settingSource{"context_window", fmt.Sprint(o.contextWin), "flag"})
+	} else if cfg.File.ContextWindow != 0 {
+		o.contextWin = int(cfg.File.ContextWindow)
+		sources = append(sources, settingSource{"context_window", fmt.Sprint(int(cfg.File.ContextWindow)), "config " + cfg.Path})
+	} else {
+		sources = append(sources, settingSource{"context_window", "0 (resolve)", "default"})
+	}
+	o.autoCompact = pickBool("auto_compact", o.autoCompact, []string{"auto-compact", "no-auto-compact"}, cfg.File.AutoCompact)
+	o.compactAt = pickInt("compact_at", o.compactAt, []string{"compact-at"}, cfg.File.CompactAt, agent.DefaultCompactAt)
 	o.systemPrompt = pickString("system_prompt", o.systemPrompt, []string{"system-prompt"}, nil, cfg.File.SystemPrompt, "")
 	o.appendPrompt = pickString("append_system_prompt", o.appendPrompt, []string{"append-system-prompt"}, nil, cfg.File.AppendSystemPrompt, "")
 	o.sessionDir = pickString("session_dir", o.sessionDir, []string{"session-dir"},
@@ -664,12 +732,38 @@ func runPrint(ctx context.Context, ag *agent.Agent, prompt string, out, errOut i
 		case agent.EventRetry:
 			fmt.Fprintf(errOut, "hal: transient failure, retrying (attempt %d of %d in %.1fs): %s\n",
 				ev.Attempt, ev.MaxAttempts, float64(ev.RetryInMS)/1000, ev.Error)
+		case agent.EventCompaction:
+			// stdout stays the answer alone, so the notice goes where tool
+			// activity already goes.
+			if ev.Compaction != nil {
+				fmt.Fprintln(errOut, "hal: "+compactionNotice(*ev.Compaction))
+			}
 		}
 	})
 	if emitted {
 		fmt.Fprintln(out)
 	}
 	return err
+}
+
+// compactionNotice describes a compaction in one line, for print mode.
+func compactionNotice(info agent.CompactionInfo) string {
+	switch {
+	case info.Error != "":
+		return "compaction failed, the context is unchanged: " + info.Error
+	case info.Messages == 0:
+		return "nothing to compact yet"
+	}
+	how := "requested"
+	if info.Automatic {
+		how = "automatic"
+	}
+	line := fmt.Sprintf("context compacted (%s): %d messages summarized, %d → %d tokens",
+		how, info.Messages, info.Before, info.After)
+	if info.Shortened > 0 {
+		line += fmt.Sprintf(", %d tool results shortened", info.Shortened)
+	}
+	return line
 }
 
 func runJSON(ctx context.Context, ag *agent.Agent, prompt string) error {
@@ -751,11 +845,20 @@ func sessionHooks(ag *agent.Agent, cwd, sessionDir string, sess *session.Session
 	}
 	adopt := func(ns *session.Session) {
 		sess = ns
-		ag.History = append([]agent.Message(nil), ns.Messages...)
+		ag.SetHistory(ns.Messages)
+		restoreCompaction(ag, ns)
 		if ns.ID != "" {
 			ag.SetSessionID(ns.ID)
 		}
 		ag.OnMessage = func(m agent.Message) { _ = ns.AppendMessage(m) }
+		ag.OnCompaction = func(c agent.Compacted) {
+			_ = ns.AppendCompaction(session.Compaction{
+				Summary:      c.Summary,
+				Messages:     c.Messages,
+				Shortened:    c.Shortened,
+				ShortenedIDs: ns.MessageIDs(c.ShortenedIndexes),
+			}, ns.MessageID(c.Through))
+		}
 	}
 	newSession := func() (string, error) {
 		ns, err := session.New(session.RootWith(sessionDir), cwd, "", ag.ModelName())
@@ -781,6 +884,26 @@ func sessionHooks(ag *agent.Agent, cwd, sessionDir string, sess *session.Session
 		return "(session " + shortSessionID(ns.ID) + " · " + fmt.Sprintf("%d messages", len(ns.Messages)) + ")", nil
 	}
 	return sessionCallbacks{Info: info, ID: id, List: list, New: newSession, Open: openSession}
+}
+
+// restoreCompaction hands a session's recorded compaction to the agent, so a
+// resumed conversation continues from the summary rather than replaying the
+// whole log into the model's context.
+func restoreCompaction(ag *agent.Agent, sess *session.Session) {
+	if sess == nil || sess.Compaction == nil {
+		return
+	}
+	idx := sess.CompactionIndex()
+	if idx < 0 {
+		return
+	}
+	ag.SetCompaction(&agent.Compacted{
+		Summary:          sess.Compaction.Summary,
+		Through:          idx,
+		Messages:         sess.Compaction.Messages,
+		Shortened:        sess.Compaction.Shortened,
+		ShortenedIndexes: sess.CompactionShortenedIndexes(),
+	})
 }
 
 func runInteractive(ag *agent.Agent, cwd, prompt, sessionDir string, sess *session.Session) error {
@@ -876,6 +999,13 @@ options:
   --max-turns <n>      maximum agent turns per prompt (default 32)
   --max-retries <n>    retries for a transient provider failure such as a
                        reset connection or a 429 (default 4, negative disables)
+  --context-window <n> model context window in tokens, with an optional k/m
+                       suffix (default 0 = resolve it from the endpoint, a
+                       built-in table, or a conservative 128k)
+  --auto-compact       compact older messages when the window fills (default on)
+  --no-auto-compact    never compact automatically
+  --compact-at <pct>   percentage of the window at which automatic compaction
+                       runs (default 80)
   --config <path>      configuration file (default $XDG_CONFIG_HOME/hal/config.toml)
   --show-config        print the resolved configuration and exit
   --web                serve the console in a browser instead of the terminal
@@ -898,10 +1028,17 @@ configuration file:
     tools    = "read,edit"        # comma-separated allowlist
     max_turns = 32
     max_retries = 4               # 0 = default, negative = never retry
+    context_window = 0            # 0 = resolve it; accepts "128k", "1m"
+    auto_compact = true           # compact when the window fills
+    compact_at = 80               # percent of the window
     system_prompt = ""            # text, or a path to a file
     no_context_files = false
     session_dir = ""              # default $XDG_DATA_HOME/hal/sessions
     session_header = ""           # "" = auto (x-opencode-session on opencode.ai)
+
+  Context: the footer shows "ctx used/limit percent". Older messages are
+  summarized automatically when the window fills; /compact does it on demand
+  and /context explains the figure.
 
   Precedence per setting: flag > environment > config file > default.
   Run 'hal --show-config' to see the resolved values and their sources.

@@ -319,3 +319,122 @@ func TestListAllOnAMissingRootIsEmpty(t *testing.T) {
 		t.Fatalf("expected no sessions, got %+v", infos)
 	}
 }
+
+func TestCompactionRoundTripKeepsEveryMessage(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	s, err := New(root, cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"one", "two", "three", "four"} {
+		if err := s.AppendMessage(agent.NewUserMessage(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	through := s.MessageID(1)
+	if through == "" {
+		t.Fatal("stored messages should have ids")
+	}
+	if err := s.AppendCompaction(Compaction{Summary: "the summary", Messages: 2, Shortened: 1}, through); err != nil {
+		t.Fatal(err)
+	}
+	path := s.Path
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The log stays complete: compaction does not delete what it summarized.
+	if len(loaded.Messages) != 4 {
+		t.Fatalf("the file should keep every message, got %d", len(loaded.Messages))
+	}
+	if loaded.Compaction == nil {
+		t.Fatal("the compaction was not restored")
+	}
+	if loaded.Compaction.Summary != "the summary" || loaded.Compaction.Messages != 2 {
+		t.Fatalf("compaction not round-tripped: %+v", loaded.Compaction)
+	}
+	if got := loaded.CompactionIndex(); got != 1 {
+		t.Fatalf("the compaction should cover messages 0..1, got %d", got)
+	}
+	if loaded.MessageID(2) == "" {
+		t.Fatal("message ids should survive a reload")
+	}
+
+	infos, err := List(root, cwd, false)
+	if err != nil || len(infos) != 1 {
+		t.Fatalf("list: %v %d", err, len(infos))
+	}
+	if !infos[0].Compacted {
+		t.Fatal("a compacted session should be marked in listings")
+	}
+}
+
+func TestCompactionIndexIsUnknownForAMissingMessage(t *testing.T) {
+	s := &Session{Compaction: &Compaction{Through: "not-a-message"}}
+	if got := s.CompactionIndex(); got != -1 {
+		t.Fatalf("an unresolvable compaction should report -1, got %d", got)
+	}
+}
+
+// TestCompactionRecordsTheShortenedResults pins that the tool results a
+// compaction replaced are recorded by identity, so a resumed session sends the
+// same context the running one did rather than the full results again.
+func TestCompactionRecordsTheShortenedResults(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+	s, err := New(root, cwd, "shortened", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"one", "two", "three", "four"} {
+		if err := s.AppendMessage(agent.NewUserMessage(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	through := s.MessageID(1)
+	shortened := s.MessageIDs([]int{2, 3})
+	if len(shortened) != 2 {
+		t.Fatalf("two stored messages should have ids, got %v", shortened)
+	}
+	if err := s.AppendCompaction(Compaction{
+		Summary:      "the summary",
+		Messages:     2,
+		Shortened:    2,
+		ShortenedIDs: shortened,
+	}, through); err != nil {
+		t.Fatal(err)
+	}
+	path := s.Path
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.CompactionShortenedIndexes()
+	if len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("the shortened results should resolve to their positions: %v", got)
+	}
+}
+
+// TestShortenedResultsMissingFromTheLogAreSkipped pins the degraded case: a
+// recorded id that no longer resolves is dropped rather than pointing at the
+// wrong message.
+func TestShortenedResultsMissingFromTheLogAreSkipped(t *testing.T) {
+	s := &Session{
+		Compaction: &Compaction{ShortenedIDs: []string{"missing", "b"}},
+		messageIDs: []string{"a", "b"},
+	}
+	got := s.CompactionShortenedIndexes()
+	if len(got) != 1 || got[0] != 1 {
+		t.Fatalf("only the resolvable id should survive: %v", got)
+	}
+}

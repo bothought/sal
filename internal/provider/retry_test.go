@@ -334,3 +334,55 @@ func TestClassifyRequestErrorMarksResets(t *testing.T) {
 		t.Fatalf("a permanent failure must not be retryable: %v", permanent)
 	}
 }
+
+func TestContextWindowFromModelMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[{"id":"other","context_length":1000},`+
+			`{"id":"m","top_provider":{"context_length":32000}}]}`)
+	}))
+	defer srv.Close()
+
+	o := NewFromEnv("k", srv.URL, "m")
+	got, ok := o.ContextWindow(context.Background())
+	if !ok || got != 32000 {
+		t.Fatalf("window = %d %v", got, ok)
+	}
+	// The lookup is memoized, so a second call does not depend on the server.
+	srv.Close()
+	if got, ok := o.ContextWindow(context.Background()); !ok || got != 32000 {
+		t.Fatalf("cached window = %d %v", got, ok)
+	}
+}
+
+func TestContextWindowIsNotPublished(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			http.Error(w, "no", http.StatusNotFound)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	o := NewFromEnv("k", srv.URL, "m")
+	if n, ok := o.ContextWindow(context.Background()); ok {
+		t.Fatalf("a missing limit is not a failure to report: %d", n)
+	}
+}
+
+func TestModelSwitchForgetsTheCachedWindow(t *testing.T) {
+	o := NewFromEnv("k", "http://127.0.0.1:1", "a")
+	// Nothing listens, so the lookup fails; the point is that the cached "not
+	// published" answer is discarded when the model changes.
+	if _, ok := o.ContextWindow(context.Background()); ok {
+		t.Skip("a lookup unexpectedly succeeded")
+	}
+	o.SetModelName("b")
+	if o.limit != nil {
+		t.Fatal("switching models should forget the cached window")
+	}
+}

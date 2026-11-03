@@ -17,14 +17,18 @@ import (
 
 // fakeAgent is a scripted stand-in for *agent.Agent.
 type fakeAgent struct {
-	mu       sync.Mutex
-	script   []agent.Event
-	blocking bool
-	prompts  []string
-	model    string
-	aborted  bool
-	failWith error
-	history  []agent.Message
+	mu         sync.Mutex
+	script     []agent.Event
+	blocking   bool
+	prompts    []string
+	model      string
+	aborted    bool
+	failWith   error
+	history    []agent.Message
+	ctxInfo    agent.ContextInfo
+	summary    string
+	summarized int
+	compacts   []string
 }
 
 func (f *fakeAgent) RunPrompt(ctx context.Context, prompt string, emit func(agent.Event)) error {
@@ -71,6 +75,33 @@ func (f *fakeAgent) Messages() []agent.Message {
 }
 
 func (f *fakeAgent) Reset() { f.mu.Lock(); f.history = nil; f.mu.Unlock() }
+
+func (f *fakeAgent) ContextInfo() agent.ContextInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ctxInfo
+}
+
+func (f *fakeAgent) Summary() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.summary
+}
+
+func (f *fakeAgent) ActiveContext() (string, []agent.Message, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.summary, append([]agent.Message(nil), f.history...), f.summarized
+}
+
+func (f *fakeAgent) Compact(_ context.Context, instructions string, automatic bool) (agent.CompactionInfo, error) {
+	f.mu.Lock()
+	f.compacts = append(f.compacts, instructions)
+	before := f.ctxInfo
+	f.mu.Unlock()
+	return agent.CompactionInfo{Messages: 12, Before: 105000, After: 24000, Automatic: automatic,
+		Shortened: before.SummaryMessages}, nil
+}
 
 func (f *fakeAgent) setHistory(msgs ...agent.Message) {
 	f.mu.Lock()
@@ -714,5 +745,310 @@ func TestPickerAtASmallTerminalStaysUsable(t *testing.T) {
 	}
 	if lines := strings.Count(view, "\n") + 1; lines > 12 {
 		t.Fatalf("the view overflowed a 12-line terminal (%d lines):\n%s", lines, view)
+	}
+}
+
+func TestFooterShowsTheContextWindow(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{
+		Used: 12400, Limit: 128000, Exact: true, AutoCompact: true, CompactAt: 80,
+	}}
+	m, _ := newTestModel(t, fa)
+	view := m.View()
+	if !strings.Contains(view, "ctx 12.4k/128k 9%") {
+		t.Fatalf("the footer should show used/limit:\n%s", view)
+	}
+
+	fa.ctxInfo = agent.ContextInfo{Used: 12400, Limit: 128000, Exact: false}
+	m, _ = newTestModel(t, fa)
+	if view := m.View(); !strings.Contains(view, "ctx ~12.4k/128k") {
+		t.Fatalf("an estimated figure should be marked:\n%s", view)
+	}
+}
+
+func TestContextSegmentSeverity(t *testing.T) {
+	cases := []struct {
+		used, limit int
+		at          int
+		color       string
+	}{
+		{1000, 128000, 80, "240"},
+		{90000, 128000, 80, "214"},
+		{110000, 128000, 80, "203"},
+		{130000, 128000, 80, "196"},
+	}
+	for _, c := range cases {
+		got := contextColor(agent.ContextInfo{Used: c.used, Limit: c.limit, AutoCompact: true, CompactAt: c.at})
+		if got != c.color {
+			t.Fatalf("%d/%d should be colour %s, got %s", c.used, c.limit, c.color, got)
+		}
+	}
+}
+
+func TestContextCommandShowsTheBreakdown(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{
+		Used: 12000, Limit: 128000, Exact: true, Source: agent.LimitFromTable,
+		System: 1200, Tools: 800, Recent: 10000, RecentMessages: 6,
+		AutoCompact: true, CompactAt: 80, KeepTurns: 3,
+	}}
+	m, _ := newTestModel(t, fa)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/context")})
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(*Model)
+
+	view := m.View()
+	for _, want := range []string{"window", "128k", "built-in table", "used", "auto-compact", "headroom"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("/context output missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestContextSummaryCommand(t *testing.T) {
+	fa := &fakeAgent{summary: "we changed the parser",
+		ctxInfo: agent.ContextInfo{SummaryText: "we changed the parser"}}
+	m, _ := newTestModel(t, fa)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/context summary")})
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(*Model)
+	if !strings.Contains(m.View(), "we changed the parser") {
+		t.Fatalf("/context summary should print the summary:\n%s", m.View())
+	}
+}
+
+func TestCompactCommandRunsAndIsReported(t *testing.T) {
+	fa := &fakeAgent{}
+	m, _ := newTestModel(t, fa)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/compact keep the parser work")})
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(*Model)
+
+	fa.mu.Lock()
+	got := append([]string(nil), fa.compacts...)
+	fa.mu.Unlock()
+	if len(got) != 1 || got[0] != "keep the parser work" {
+		t.Fatalf("instructions were not passed: %v", got)
+	}
+	view := m.View()
+	if !strings.Contains(view, "context compacted") || !strings.Contains(view, "12 messages summarized") {
+		t.Fatalf("the compaction should be reported:\n%s", view)
+	}
+}
+
+func TestCompactWhileRunningIsQueued(t *testing.T) {
+	fa := &fakeAgent{blocking: true}
+	m, _ := newTestModel(t, fa)
+	var tm tea.Model = m
+	tm, cmd := tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("work")})
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(*Model)
+	_ = cmd
+	m.running = true // the run is in flight
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/compact")})
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(*Model)
+	if len(m.queued) != 1 || m.queued[0] != "/compact" {
+		t.Fatalf("compaction should be queued while a run is in flight: %v", m.queued)
+	}
+	fa.mu.Lock()
+	n := len(fa.compacts)
+	fa.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("it must not compact mid-turn: %d", n)
+	}
+}
+
+func TestCompactionEventAddsABlock(t *testing.T) {
+	fa := &fakeAgent{}
+	m, _ := newTestModel(t, fa)
+	info := agent.CompactionInfo{Messages: 18, Before: 105000, After: 24000, Automatic: true}
+	var tm tea.Model = m
+	tm, _ = tm.Update(eventMsg(agent.Event{Type: agent.EventCompaction, Compaction: &info}))
+	m = tm.(*Model)
+	view := m.View()
+	if !strings.Contains(view, "context compacted") || !strings.Contains(view, "105k → 24k") {
+		t.Fatalf("the block should describe the compaction:\n%s", view)
+	}
+	if !strings.Contains(view, "automatic") {
+		t.Fatalf("an automatic compaction should say so:\n%s", view)
+	}
+}
+
+func TestContextSegmentSaysHowFarOverItIs(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{Used: 130000, Limit: 128000, Exact: true}}
+	m, _ := newTestModel(t, fa)
+	view := m.View()
+	if !strings.Contains(view, "ctx 130k/128k over by 2k") {
+		t.Fatalf("an over-full window should say by how much:\n%s", view)
+	}
+	if strings.Contains(view, "101%") {
+		t.Fatalf("a percentage past the window is less useful than the gap:\n%s", view)
+	}
+}
+
+func TestFooterSaysCompactingWhileItRuns(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{
+		Used: 105000, Limit: 128000, Exact: true, Compacting: true,
+		AutoCompact: true, CompactAt: 80,
+	}}
+	m, _ := newTestModel(t, fa)
+	m.running = true
+	if view := m.View(); !strings.Contains(view, "compacting…") {
+		t.Fatalf("the status should say compaction is running:\n%s", view)
+	}
+}
+
+func TestContextReportShowsTheLastRequest(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{
+		Used: 12400, Limit: 128000, Exact: true, Source: agent.LimitFromTable,
+		System: 1200, Tools: 800, Recent: 10000, RecentMessages: 6,
+		AutoCompact: true, CompactAt: 80, KeepTurns: 3,
+		LastInput: 12398, LastOutput: 214,
+	}}
+	m, _ := newTestModel(t, fa)
+	m, _ = typeAndEnter(t, m, "/context")
+	view := m.View()
+	if !strings.Contains(view, "last request") || !strings.Contains(view, "12.4k input + 214 output") {
+		t.Fatalf("/context should show what the provider reported:\n%s", view)
+	}
+	if strings.Contains(view, "(estimated)") {
+		t.Fatalf("a measured figure should not be called estimated:\n%s", view)
+	}
+}
+
+func TestCompactNotificationSaysToolResultsWereShortened(t *testing.T) {
+	fa := &fakeAgent{}
+	m, _ := newTestModel(t, fa)
+	info := agent.CompactionInfo{Messages: 18, Before: 105000, After: 24000, Shortened: 2}
+	var tm tea.Model = m
+	tm, _ = tm.Update(eventMsg(agent.Event{Type: agent.EventCompaction, Compaction: &info}))
+	m = tm.(*Model)
+	if view := m.View(); !strings.Contains(view, "2 tool results shortened") {
+		t.Fatalf("the block should say the tail was shortened:\n%s", view)
+	}
+}
+
+func TestReplayShowsTheSummaryInsteadOfTheCompactedMessages(t *testing.T) {
+	fa := &fakeAgent{
+		summary:    "we fixed the parser",
+		summarized: 4,
+	}
+	fa.setHistory(
+		agent.NewUserMessage("the recent question"),
+		agent.Message{Role: agent.RoleAssistant, Content: "the recent answer"},
+	)
+	m, _ := newTestModel(t, fa)
+	m.replayHistory()
+	m.layout()
+	m.refresh()
+	view := m.View()
+	if !strings.Contains(view, "summary of earlier conversation") || !strings.Contains(view, "we fixed the parser") {
+		t.Fatalf("the rebuilt transcript should show the summary:\n%s", view)
+	}
+	if !strings.Contains(view, "4 earlier messages") {
+		t.Fatalf("it should say how many messages are not replayed:\n%s", view)
+	}
+	if !strings.Contains(view, "the recent question") {
+		t.Fatalf("the kept messages should still be replayed:\n%s", view)
+	}
+}
+
+func TestSessionSwitcherMarksACompactedSession(t *testing.T) {
+	info := session.Info{ID: "aaaa000011112222", Model: "m", Messages: 9, Compacted: true}
+	if got := sessionLabel(info); !strings.Contains(got, "compacted") {
+		t.Fatalf("a compacted session should say so: %q", got)
+	}
+	info.Compacted = false
+	if got := sessionLabel(info); strings.Contains(got, "compacted") {
+		t.Fatalf("an uncompacted session should not: %q", got)
+	}
+}
+
+func TestContextCommandDuringARunDoesNotReadTheAgent(t *testing.T) {
+	fa := &fakeAgent{}
+	m, _ := newTestModel(t, fa)
+	m.running = true
+	m.ctx = agent.ContextInfo{Used: 9000, Limit: 128000, Exact: true}
+	fa.ctxInfo = agent.ContextInfo{Used: 1, Limit: 2} // would be wrong if read
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/context")})
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(*Model)
+	if !strings.Contains(m.View(), "in flight") {
+		t.Fatalf("/context should defer to the footer while a run is in flight:\n%s", m.View())
+	}
+	if m.ctx.Used != 9000 {
+		t.Fatalf("the console's own figure should survive: %+v", m.ctx)
+	}
+}
+
+func TestContextSummaryIsShownWhileARunIsInFlight(t *testing.T) {
+	fa := &fakeAgent{}
+	m, _ := newTestModel(t, fa)
+	info := agent.ContextInfo{Used: 100, Limit: 128000, SummaryText: "the streamed summary"}
+	var tm tea.Model = m
+	tm, _ = tm.Update(eventMsg(agent.Event{Type: agent.EventContext, Context: &info}))
+	m = tm.(*Model)
+	m.running = true // the agent must not be read now
+	m, _ = typeAndEnter(t, m, "/context summary")
+	if !strings.Contains(m.View(), "the streamed summary") {
+		t.Fatalf("/context summary should use the event stream while a run is in flight:\n%s", m.View())
+	}
+}
+
+func TestSwitchingRecomputesTheIndicator(t *testing.T) {
+	fa := &fakeAgent{}
+	m, _ := newTestModel(t, fa)
+	m.opts.OpenSession = func(id string) (string, error) {
+		fa.setHistory(agent.NewUserMessage("restored"))
+		fa.ctxInfo = agent.ContextInfo{Used: 4321, Limit: 128000}
+		return "(" + id + ")", nil
+	}
+	m.switchTo("aaaa000011112222")
+	if m.ctx.Used != 4321 || m.ctx.Limit != 128000 {
+		t.Fatalf("the indicator should follow the restored context: %+v", m.ctx)
+	}
+}
+
+// TestContextSeverityAppliesWithAutomaticCompactionOff pins §3.2: the bands
+// describe how full the window is, not whether anything will act on it.
+func TestContextSeverityAppliesWithAutomaticCompactionOff(t *testing.T) {
+	c := agent.ContextInfo{Used: 110000, Limit: 128000, AutoCompact: false, CompactAt: 80}
+	if got := contextColor(c); got != "203" {
+		t.Fatalf("at the threshold the segment is critical even with compaction off, got %s", got)
+	}
+	if got := contextColor(agent.ContextInfo{Used: 90000, Limit: 128000, CompactAt: 80}); got != "214" {
+		t.Fatalf("between the warning band and the threshold, got %s", got)
+	}
+}
+
+// TestCompactionBlockReportsTheKeptTurns pins that the block says how many
+// turns were actually kept.
+func TestCompactionBlockReportsTheKeptTurns(t *testing.T) {
+	fa := &fakeAgent{}
+	m, _ := newTestModel(t, fa)
+	var tm tea.Model = m
+	info := agent.CompactionInfo{Messages: 9, Before: 105000, After: 24000, KeptTurns: 2, Automatic: true}
+	tm, _ = tm.Update(eventMsg(agent.Event{Type: agent.EventCompaction, Compaction: &info}))
+	m = tm.(*Model)
+	if view := m.View(); !strings.Contains(view, "the last 2 turns kept") {
+		t.Fatalf("the block should report the turns it kept:\n%s", view)
+	}
+}
+
+// TestContextSummaryNeedsOnlyTheFirstWord pins that the two consoles agree:
+// /context treats any argument word as the subcommand, so extra text does not
+// turn it into a breakdown request.
+func TestContextSummaryNeedsOnlyTheFirstWord(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{Used: 10, Limit: 100, SummaryText: "we changed the parser"}}
+	m, _ := newTestModel(t, fa)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/context summary please")})
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if view := tm.(*Model).View(); !strings.Contains(view, "we changed the parser") {
+		t.Fatalf("/context summary with trailing words should print the summary:\n%s", view)
 	}
 }

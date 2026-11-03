@@ -326,3 +326,80 @@ func TestExpandPath(t *testing.T) {
 		}
 	}
 }
+
+func TestSizeAcceptsSuffixes(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want int
+	}{
+		{"128k", 128000},
+		{"1m", 1000000},
+		{"128K", 128000},
+		{"  64k ", 64000},
+		{"32000", 32000},
+		{"", 0},
+	} {
+		got, err := ParseSize(c.in)
+		if err != nil || got != c.want {
+			t.Fatalf("ParseSize(%q) = %d, %v; want %d", c.in, got, err, c.want)
+		}
+	}
+	for _, bad := range []string{"abc", "-1k", "12x"} {
+		if _, err := ParseSize(bad); err == nil {
+			t.Fatalf("%q should be rejected", bad)
+		}
+	}
+}
+
+func TestContextSettingsLoadFromBothFormats(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{ConfigDir: dir}
+
+	tomlPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte(
+		"context_window = \"200k\"\nauto_compact = false\ncompact_at = 65\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := Load("", paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(l.File.ContextWindow) != 200000 {
+		t.Fatalf("quoted size in TOML: %d", int(l.File.ContextWindow))
+	}
+	if l.File.AutoCompact == nil || *l.File.AutoCompact {
+		t.Fatal("auto_compact = false should be recorded")
+	}
+	if l.File.CompactAt != 65 {
+		t.Fatalf("compact_at = %d", l.File.CompactAt)
+	}
+
+	jsonDir := t.TempDir()
+	jsonPath := filepath.Join(jsonDir, "config.json")
+	if err := os.WriteFile(jsonPath, []byte(
+		`{"context_window":"1m","auto_compact":true,"compact_at":70}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, err = Load("", Paths{ConfigDir: jsonDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(l.File.ContextWindow) != 1000000 {
+		t.Fatalf("string size in JSON: %d", int(l.File.ContextWindow))
+	}
+}
+
+func TestSizeAcceptsPlainNumbersInJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"context_window": 32000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := Load("", Paths{ConfigDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(l.File.ContextWindow) != 32000 {
+		t.Fatalf("numeric size: %d", int(l.File.ContextWindow))
+	}
+}
