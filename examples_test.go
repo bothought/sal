@@ -163,8 +163,13 @@ func TestExampleMockConfigPreset(t *testing.T) {
 	if cfg.BaseURL != "http://127.0.0.1:8792/v1" {
 		t.Fatalf("mock base_url = %q", cfg.BaseURL)
 	}
-	if cfg.Model != "mock-model" || cfg.APIKey == "" {
+	if cfg.Model != "mock-model" {
 		t.Fatalf("mock preset incomplete: %+v", cfg)
+	}
+	// The preset must not carry a literal key: a committed file is checked out
+	// world-readable, so the secret would be one warning away from being ignored.
+	if cfg.APIKey != "" {
+		t.Fatalf("the mock preset should keep credentials out of the file, got api_key %q", cfg.APIKey)
 	}
 	if cfg.Tools != "read,write,edit,bash,grep,find,ls" {
 		t.Fatalf("mock tools = %q", cfg.Tools)
@@ -214,5 +219,29 @@ func TestExamplesDriveResolution(t *testing.T) {
 	}
 	if src["base_url"] == "default" || src["model"] == "default" {
 		t.Fatalf("mock preset should supply base_url and model: %v", src)
+	}
+}
+
+// TestExamplesCarryNoLiteralSecret pins a property a checkout cannot change:
+// example files are committed and therefore arrive world-readable, so any
+// literal api_key in one produces the permissions warning hal is supposed to
+// give — which the loader here treats as a schema failure. The bug this
+// prevents was invisible locally, where a umask of 077 made the file 0600.
+func TestExamplesCarryNoLiteralSecret(t *testing.T) {
+	entries, err := filepath.Glob(filepath.Join("examples", "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no example files found")
+	}
+	for _, path := range entries {
+		loaded, err := config.Load(path, config.Resolve())
+		if err != nil {
+			t.Fatalf("%s does not parse: %v", path, err)
+		}
+		if loaded.File.APIKey != "" {
+			t.Fatalf("%s contains a literal api_key; use api_key_env instead", path)
+		}
 	}
 }
