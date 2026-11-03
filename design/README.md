@@ -46,6 +46,26 @@ committed before the code that depends on it. Merging is the review: a document
 on `main` is a document to implement, and the code that implements it needs no
 further approval step of its own.
 
+## How much detail each kind of document carries
+
+The two kinds are written at deliberately different depths:
+
+- **Feature documents are detailed, and written for the user.** They describe
+  every behaviour the program has: what is displayed, what each command and
+  setting does, what is stored, what happens on failure or interruption, and
+  what the edge cases are. The vocabulary is the interface's — commands,
+  settings, screens, files the user can see — never the code's. A feature
+  document should be complete enough that the behaviour can be checked against
+  it without reading the source, and the code is expected to match it exactly.
+- **Technical documents give the architecture, not the implementation.** They
+  say which parts the program is made of, what each part is responsible for, how
+  the parts fit together, what data flows between them, which invariants hold,
+  and why the structure is that way. They deliberately do not contain source
+  code, type or function names, or step-by-step algorithms: those belong in the
+  code and its doc comments. A change that only touches such internals needs no
+  document change; a change to the parts, their responsibilities, or an
+  invariant does.
+
 ## Index
 
 ### Features

@@ -93,7 +93,10 @@ The indicator changes appearance as the window fills, so it reads at a glance:
 
 The thresholds use the configured auto-compaction threshold (§5) so that
 "critical" always means "compaction is about to happen or has just happened",
-rather than a second set of magic numbers.
+rather than a second set of magic numbers. The bands are the same whether or not
+automatic compaction is enabled: with it off they still show how close the
+conversation is to the window, there is simply no `compacting…` status and no
+automatic compaction behind them.
 
 ### 3.3 Where the limit comes from
 
@@ -117,6 +120,13 @@ the built-in table`, `assumed`); the footer shows only the figure, since a
 caveat on every line would crowd it. A wrong limit only changes *when* compaction
 happens; it never corrupts a conversation.
 
+Resolution is lazy and happens when the window is first needed, which is before
+the first request of a run. An interface drawing its footer is not a reason to
+ask the endpoint, so the footer may briefly show the table or the default while
+the configured value is still 0; the first run resolves the real one, and every
+figure after that uses it. `/model` discards the resolved value and asks again,
+because the window belongs to the model.
+
 The limit follows the model: `/model` re-resolves it immediately, and switching
 to a model with a smaller window re-evaluates the threshold (§4.4, §6.3). A
 resumed session whose recorded model differs from the current one uses the
@@ -132,8 +142,11 @@ provider allows:
   that moment, so `used` is their sum until something is appended.
 - **Estimated.** Anything appended after that response — tool results, a new
   user message, and the state after a compaction — is estimated from its text,
-  and the estimate is marked `~` until the next response replaces it with a
-  measured figure.
+  and the whole figure is marked `~` until the next response replaces it with a
+  measured figure. A figure is only exact when no part of it is estimated: as
+  soon as one message is appended after a response, the footer and `/context`
+  say `~` again, even though the number itself is the measured base plus an
+  estimate of the new messages.
 - **First request.** Nothing has been measured yet, so the whole context is
   estimated: system prompt, tool definitions, and the messages.
 
@@ -213,7 +226,13 @@ the instructions, not the conversation.
 
 The summarization request carries no tool definitions, so the model can only
 answer it with text — a summary cannot turn into a tool call, whatever the
-conversation it is summarizing contains.
+conversation it is summarizing contains. It uses the same retry policy as a
+normal turn (§4.7); it does not produce `retrying` notices of its own, so a
+retry of the summary is not mistaken for a retry of the user's turn.
+
+The summary request itself is sent again to the provider, so it is billed like
+any other request; it is not shown in the transcript, and it does not appear as
+an assistant message in the session file.
 
 ### 4.2 What is kept verbatim
 
@@ -269,7 +288,10 @@ the agent checks whether the projected context has reached the threshold:
 - threshold = **80%** of the window (`--compact-at <percent>` / `compact_at`);
 - the check runs once before each request. If used is at or above the threshold
   and automatic compaction is enabled, compaction runs, and then the request is
-  sent; the check never loops, so a run cannot stall trying to shrink itself;
+  sent; the check never loops, so a run cannot stall trying to shrink itself.
+  Compaction never runs while a tool call is outstanding or in the middle of a
+  streamed answer: the check sits between turns, where the conversation is
+  consistent;
 - the summarized context is targeted at **at most 50%** of the window, so the
   session has room for several more turns rather than compacting again
   immediately; if the kept tail alone is larger than that, older tool results in
@@ -280,7 +302,10 @@ the agent checks whether the projected context has reached the threshold:
   summarizable part is tiny — further automatic compaction is disabled for the
   rest of the session and one warning says so. The indicator keeps warning, and a
   rejected request reports the provider's own error. Summarizing repeatedly for
-  no gain is worse than sending and failing once.
+  no gain is worse than sending and failing once. When there is nothing left to
+  summarize at all (only the kept tail remains), automatic compaction is
+  disabled the same way but without a notice: nothing went wrong, there is
+  simply nothing to do.
 
 Automatic compaction applies in every mode, including print and JSON, because it
 protects the run itself; the interfaces differ only in how they report it (§4.6).
@@ -325,8 +350,13 @@ ability to compact.
 
   The block is informational, not an error. When a tool result in the kept tail
   had to be shortened to meet the target, the block says so
-  (`2 tool results shortened`). The summary text itself is available with
-  `/context summary`.
+  (`2 tool results shortened`). When automatic compaction has been switched off
+  for the rest of the session because compacting did not free enough of the
+  window, the block says that too, so a later request that fails is not a
+  surprise. The summary text itself is available with `/context summary`.
+- A manual `/compact` with nothing to summarize adds a block saying so; a manual
+  one that fails adds a block naming the failure and stating that the context is
+  unchanged.
 - The **visible transcript is not rewritten**: the messages that were summarized
   stay on screen for the rest of the session. The transcript is the user's record
   of what happened; compaction is a change to what the model is sent, not a
@@ -341,7 +371,7 @@ ability to compact.
 ### 4.7 Failure and interruption
 
 - A compaction request uses the normal retry policy for transient provider
-  failures (`basic-functions` §2.5).
+  failures (`basic-functions` §2.6).
 - If summarization fails, the active context is left **unchanged** and the
   failure is reported. An automatic compaction that fails does not block the run:
   the request proceeds with the uncompacted context, and its own outcome is what
@@ -352,7 +382,11 @@ ability to compact.
   summary. This is the case where the context is already at the limit before
   anything is compacted, so it is the path that must not fail.
 - Aborting (`esc`) during a compaction cancels it and leaves the context
-  unchanged.
+  unchanged. The transcript block for that attempt says the compaction was
+  cancelled, since the run's own failure notice is suppressed for an abort.
+- A compaction that is queued (a `/compact` submitted during a run) stays queued
+  with the conversation it was submitted in: switching sessions or starting a new
+  one drops it, exactly as it drops queued prompts.
 - Compaction never runs while a tool call is outstanding, and never runs in the
   middle of a streamed answer; the cut is always between turns.
 
@@ -498,8 +532,8 @@ Not part of this feature, and not to be added by implementing it:
 Implementing this changes `design/features/basic-functions` in these places, and
 this document is the reference for the new text:
 
-- §2 (the agent loop) notes that a request may be preceded by a compaction, and
-  that §2.5's retry policy covers the summarization request too.
+- §2 (the agent loop) gains a *context window* part describing the threshold
+  check, and its retry policy is stated to cover the summarization request too.
 - §4.1 and §4.2 (the terminal and web footers) gain the context segment; the
   §4.1 footer description currently ends with the turn count.
 - §5 (sessions) notes that a compacted session keeps its full log and resumes

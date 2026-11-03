@@ -78,7 +78,14 @@ so far is kept.
   conversation: switching sessions (or `/new`) aborts the run in flight and
   drops its queue, so the turns of one conversation stay together.
 
-### 2.5 Transient provider failures
+### 2.5 Context window
+
+Before each request, if the next request would exceed the configured share of
+the model's context window, the oldest part of the conversation is replaced by a
+summary (see `design/features/context-management`). The retry policy below also
+covers the summarization request.
+
+### 2.6 Transient provider failures
 
 Connection resets (`read: connection reset by peer`), timeouts, and `429`/`5xx`
 responses are treated as transient and retried with exponential backoff — 0.5s,
@@ -152,7 +159,9 @@ The default mode when both stdin and stdout are a terminal. Its screen is:
   it runs), system notes, and errors (`✗`);
 - a multi-line **editor** whose border is highlighted while a run is in flight;
 - a **footer** with the working directory on the left and model, status,
-  `↑input ↓output` token counts and turn count on the right.
+  `ctx used/limit percent`, `↑input ↓output` token counts and turn count on the
+  right. The context segment is the size of the next request (see
+  `design/features/context-management`); the cumulative counters stay separate.
 
 Startup prints the version/model line, the enabled tools, the key bindings, and
 the command list as the first transcript block. A long tool result in the
@@ -191,7 +200,7 @@ build step and no external assets (it is served from the binary):
 - The page has a header (title, working directory, session menu), a transcript
   with the same block kinds as the terminal UI, a composer (`Send`, `Abort`,
   `enter` sends, `shift+enter` inserts a newline, `esc` aborts), and a footer
-  with the session and token usage.
+  with the session, the context-window segment, and token usage.
 - The session id is kept in the URL, so reloading a tab reopens the same
   conversation; `/new` rewrites the URL. Loading a URL naming another session
   reopens that stored session and rebuilds the transcript, marked as restored.
@@ -241,7 +250,8 @@ entirely; the conversation then lives only in memory.
 
 Each stored session carries an id (16 hex characters, shown as its first 8), a
 display name (default: the id prefix, or `--name`/`name`), a model, the working
-directory, a message count and an update time.
+directory, a message count and an update time. A session that has been compacted
+says so in the switcher, since its active context is shorter than its file.
 
 ### 5.2 Resuming from the command line
 
@@ -276,7 +286,8 @@ Available in the terminal UI and the web console (the web console's `/quit`
 explains that closing the tab is how to stop it):
 
 ```
-/help  /model [name]  /new  /session  /switch [id]  /sessions  /tools  /clear  /quit
+/help  /model [name]  /new  /session  /switch [id]  /sessions  /tools
+/context [summary]  /compact [notes]  /clear  /quit
 ```
 
 - `/model` shows the current model; `/model <name>` switches it for the rest of
@@ -284,6 +295,10 @@ explains that closing the tab is how to stop it):
 - `/new` clears the conversation and starts a fresh session file.
 - `/session` describes the current session (id, file, message count).
 - `/tools` lists the enabled tools.
+- `/context` prints the context-window breakdown and where the limit came from;
+  `/context summary` prints the active summary.
+- `/compact [instructions]` replaces older messages with a summary now; during a
+  run it is queued after the current turn.
 - `/clear` empties the visible transcript without touching the conversation.
 
 ### 6.2 Configuration resolution
@@ -308,6 +323,9 @@ api_key_env    = ""              # or name a variable, e.g. GATEWAY_API_KEY
 tools          = "read,bash,edit,write,grep,find,ls"
 max_turns      = 32
 max_retries    = 4               # 0 = default, negative = never retry
+context_window = 0               # 0 = resolve it; accepts "128k", "1m"
+auto_compact   = true            # summarize older messages when the window fills
+compact_at     = 80              # percent of the window that triggers it
 system_prompt        = ""        # text, or a path to a file
 append_system_prompt = ""
 session_dir    = ""              # default $XDG_DATA_HOME/hal/sessions
@@ -395,10 +413,14 @@ Not implemented, deliberately, and not to be added without a design change:
   through a compatible gateway.
 - Extensions, skills, prompt templates, packages, themes, sub-agents, MCP, plan
   mode, background bash.
-- Session-tree navigation (`/tree`, `/fork`, `/clone`), compaction, HTML export.
-  Sessions are linear and resumable only.
-- Prompt caching, cost accounting, context-window tracking (the footer reports
-  token counts only).
+- Session-tree navigation (`/tree`, `/fork`, `/clone`) or HTML export. Sessions
+  are linear and resumable only. (Compaction is not an exception to this: it
+  changes what the model is sent, not the session tree, and the log stays
+  complete — see `design/features/context-management`.)
+- Prompt caching and cost accounting. The context window is tracked
+  approximately (see `design/features/context-management`): no bundled
+  tokenizer, and a small built-in table of model windows rather than a vendor
+  matrix.
 - `grep` uses Go's regexp rather than ripgrep, and the search tools do not read
   `.gitignore`.
 - Per-tool result persistence: tool output is stored in the session, but

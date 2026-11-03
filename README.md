@@ -19,11 +19,14 @@ skill, package, and provider-matrix machinery.
   `ls`.
 - **Terminal UI.** Startup header, scrollable transcript showing each tool call
   and its output, multi-line editor, and a footer with directory, model, session
-  status, and token usage.
+  status, context-window use, and token usage.
 - **Four interfaces:** interactive TUI, `--web` browser console, `--print`
   one-shot, and `--mode json` for a machine-readable event stream.
 - **JSONL sessions** with parent links, grouped per working directory, resumable
   with `-c`.
+- **Context window.** The footer shows `ctx used/limit` for the next request,
+  and older messages are summarized automatically when the window fills (or on
+  `/compact`), so a long session keeps working.
 - **OpenAI-compatible provider** — OpenAI, OpenRouter, Groq, Ollama, llama.cpp,
   vLLM, LM Studio, and anything else speaking `/chat/completions`.
 
@@ -78,6 +81,9 @@ api_key  = ""                  # prefer the HAL_API_KEY environment variable
 tools    = "read,bash,edit,write,grep,find,ls"
 max_turns = 32
 max_retries = 4                # 0 = default, negative = never retry a transient failure
+context_window = 0             # 0 = resolve it; accepts "128k", "1m"
+auto_compact = true            # summarize older messages when the window fills
+compact_at = 80                # percent of the window that triggers it
 
 system_prompt        = ""      # text, or a path to a file
 append_system_prompt = ""
@@ -217,11 +223,11 @@ run shell commands. The page is served from the binary, so there is no build ste
 and no extra files.
 
 `xterm`-free transcript: user turns, streamed assistant text, each tool call
-with its output and duration, errors, and a footer with model, status, token
-usage, session, and turns. The editor supports the same slash commands as the
-TUI (`/help /model /new /session /tools /clear`); `enter` sends, `shift+enter`
-inserts a newline, `esc` aborts, and a prompt submitted while the agent is busy
-is queued. Server-sent events carry the stream; each reconnect resynchronises
+with its output and duration, errors, and a footer with model, status,
+context-window use, token usage, session, and turns. The editor supports the
+same slash commands as the TUI (`/help /model /new /session /tools /context
+/compact /clear`); `enter` sends, `shift+enter` inserts a newline, `esc` aborts,
+and a prompt submitted while the agent is busy is queued. Server-sent events carry the stream; each reconnect resynchronises
 from a full snapshot, so a dropped connection never duplicates or loses blocks.
 
 #### Reloading, and surviving a restart
@@ -280,13 +286,60 @@ retrying, and `0` means the default.
 | `ctrl+l` | clear the transcript |
 | `ctrl+c` | quit |
 
+### Context window and compaction
+
+The footer carries a context segment between the status and the cumulative token
+counters:
+
+```
+~/work/hal   gpt-4o-mini · ready · ctx 12.4k/128k 10% · ↑120k ↓8.2k · 3 turns
+```
+
+`used` is the size of the *next* request — system prompt, tool definitions, and
+the active conversation — while `↑`/`↓` stay the cumulative spend. A `~` marks
+an estimated figure: the provider's reported token counts make it exact after
+each response, and anything appended since is estimated until the next one.
+
+The limit is resolved from `--context-window`, then the endpoint's model
+metadata when it publishes one, then a small built-in table, then a conservative
+128k. `/context` prints the breakdown and the source of each number.
+
+As the window fills, older messages are replaced by a summary, first
+automatically at 80% (or `--compact-at`), and on demand with:
+
+```
+/compact [what to keep]
+```
+
+The most recent 3 turns are kept verbatim, the system prompt and tool
+definitions are never touched, and the summary is labelled as a record rather
+than instructions. The visible transcript is not rewritten: it stays your
+record of what happened. The session file keeps every message, and resuming
+continues from the summary. `/context summary` prints what the model was told
+about the compacted part. `--no-auto-compact` leaves compaction to you; the
+footer still warns as the window fills, and a request that is too large then
+fails with the provider's error.
+
+A compaction in progress shows `compacting…` in the status, and a prompt
+submitted meanwhile is queued. A failed compaction leaves the context unchanged
+and says so; it never blocks the run. With automatic compaction off because it
+could not free enough of the window, the notification says so rather than
+failing silently later.
+
 ### Slash commands
 
 ```
 /help      /model [name]   /new      /session
 /switch [id]              /sessions /tools
+/context [summary]        /compact [notes]
 /clear     /quit
 ```
+
+`/context` prints the breakdown: the model, where the window came from, used and
+its parts (system prompt, tools, summary, recent messages), headroom, the
+automatic-compaction setting and the last measured request. `/compact [notes]`
+compacts immediately when idle and queues after the current turn otherwise; the
+notes are passed to the summarization as what to preserve.
 
 ### Context files
 
@@ -366,10 +419,13 @@ Deliberate, given "basic functions only":
   reachable through a compatible gateway.
 - No extensions, skills, prompt templates, packages, themes, sub-agents, MCP,
   plan mode, or background bash.
-- No session tree navigation (`/tree`, `/fork`, `/clone`), compaction, or
-  HTML export; sessions are linear and resumable only.
-- No prompt caching, cost accounting, or context-window tracking; the footer
-  reports token counts only.
+- No session tree navigation (`/tree`, `/fork`, `/clone`) or HTML export;
+  sessions are linear and resumable only. Compaction is not an exception: it
+  changes what the model is sent, not the stored session, which keeps every
+  message.
+- No prompt caching or cost accounting; the footer reports token counts only.
+- Context tracking is approximate: no bundled tokenizer, and a small built-in
+  table for model windows rather than a vendor matrix.
 - `grep` uses Go's `regexp` rather than ripgrep, and neither search tool reads
   `.gitignore`.
 
