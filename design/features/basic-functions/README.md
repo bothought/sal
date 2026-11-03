@@ -28,11 +28,12 @@ Everything hal does is one of four things:
    configuration file.
 
 Deliberately out of scope: extensions, skills, prompt templates, packages,
-themes, sub-agents, MCP, plan mode, background bash, session trees, compaction,
-HTML export, prompt caching, cost accounting, context-window tracking, and every
-provider that does not speak the OpenAI `/chat/completions` protocol. Section 9
-repeats this list as a boundary, so a missing feature is visible here rather
-than inferred from the code.
+themes, sub-agents, MCP, plan mode, background bash, session trees, HTML export,
+prompt caching, cost accounting, and every provider that does not speak the
+OpenAI `/chat/completions` protocol. Context-window tracking and compaction are
+no longer on this list: they are specified in
+`design/features/context-management`. Section 9 repeats the boundary, so a
+missing feature is visible here rather than inferred from the code.
 
 ## 2. The agent loop
 

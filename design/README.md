@@ -79,8 +79,8 @@ The two kinds are written at deliberately different depths:
 
 | Item | Scope |
 |---|---|
-| [architecture](technical/architecture/README.md) | Package layout, the interfaces between packages, concurrency, data formats, configuration resolution, retry policy, and the testing strategy. |
-| [context-compaction](technical/context-compaction/README.md) | The technical design of `features/context-management`: limit discovery, token estimation, the threshold check in the agent loop, the compaction entry in the JSONL format, and how the front ends render the new state. |
+| [architecture](technical/architecture/README.md) | Package layout, the responsibility of each part and the interfaces between them, the data formats, the concurrency model, and the testing strategy. |
+| [context-compaction](technical/context-compaction/README.md) | The technical design of `features/context-management`: where the policy lives, how the four modes share it, what flows between the loop, the session and the front ends, and which invariants the structure guarantees. |
 
 The index lists every item, written or not. An item whose document does not
 exist yet is marked *(not written yet)*, so a gap is visible rather than silently
