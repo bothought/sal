@@ -36,6 +36,11 @@ const (
 	EventError      = "error"
 	// EventRetry reports that a transient provider failure is being retried.
 	EventRetry = "retry"
+	// EventContext reports the size of the next request against the model's
+	// context window.
+	EventContext = "context"
+	// EventCompaction reports that older messages were replaced by a summary.
+	EventCompaction = "compaction"
 )
 
 // MaxToolResultChars caps a single tool result before it is fed back to the
@@ -94,6 +99,15 @@ type Provider interface {
 	Stream(ctx context.Context, messages []Message, tools []ToolSpec, onText func(string)) (Message, error)
 }
 
+// ContextLimiter is implemented by providers that can report the model's
+// context window. Providers that cannot are asked nothing; the window then
+// comes from the built-in table or the default.
+type ContextLimiter interface {
+	// ContextWindow reports the model's window in tokens, or false when the
+	// endpoint does not publish one. A failure to find out is not an error.
+	ContextWindow(ctx context.Context) (int, bool)
+}
+
 // ModelSetter is implemented by providers that let the model be switched at
 // runtime (used by the TUI's /model command).
 type ModelSetter interface{ SetModelName(string) }
@@ -124,6 +138,10 @@ type Event struct {
 	Attempt     int `json:"attempt,omitempty"`
 	MaxAttempts int `json:"maxAttempts,omitempty"`
 	RetryInMS   int `json:"retryInMs,omitempty"`
+	// Context describes the context window (EventContext).
+	Context *ContextInfo `json:"context,omitempty"`
+	// Compaction describes one compaction (EventCompaction).
+	Compaction *CompactionInfo `json:"compaction,omitempty"`
 }
 
 // Agent drives the loop.
@@ -140,6 +158,18 @@ type Agent struct {
 	// RetryBaseDelay is the first backoff step; it doubles per attempt. Zero
 	// means DefaultRetryBaseDelay.
 	RetryBaseDelay time.Duration
+	// ContextWindowOverride, when positive, is the model's context window in
+	// tokens, overriding discovery. Zero means resolve it (see resolveLimit).
+	ContextWindowOverride int
+	// AutoCompact enables compaction of older messages when the context
+	// approaches ContextWindow. The zero value is off; New sets it on.
+	AutoCompact bool
+	// CompactAt is the percentage of the window at which automatic compaction
+	// runs. Zero means DefaultCompactAt.
+	CompactAt int
+	// KeepTurns is how many recent user turns are kept verbatim. Zero means
+	// DefaultKeepTurns.
+	KeepTurns int
 	// Sleep waits between retries. It is a field so tests do not wait.
 	Sleep func(context.Context, time.Duration) error
 	// OnEvent receives every event; never nil after New.
@@ -147,6 +177,35 @@ type Agent struct {
 	// OnMessage receives every message appended to the history, which is how
 	// sessions persist themselves.
 	OnMessage func(Message)
+	// OnCompaction receives every compaction, so a session can record it and
+	// resume from the summary rather than the whole log.
+	OnCompaction func(Compacted)
+
+	// Resolved context window and its source, cached per model.
+	limitModel  string
+	limitTokens int
+	limitSource string
+	// Fixed part of every request (system prompt, tool definitions), cached.
+	baseTokensSet bool
+	systemTokens  int
+	toolTokens    int
+	// Last measured context size and the message index it covers, plus what the
+	// provider reported for that request.
+	measured   int
+	measuredAt int
+	measuredOK bool
+	lastInput  int
+	lastOutput int
+	// compaction is the active summary, or nil when the context is complete.
+	compaction *Compacted
+	// shortened lists history indexes whose tool result is sent as a marker.
+	shortened []int
+	// autoDisabled keeps the threshold check from retrying a compaction that
+	// cannot free enough of the window, for the rest of the session.
+	autoDisabled bool
+	// compacting is true while an automatic compaction is in flight, so the
+	// status line can say so.
+	compacting bool
 }
 
 // Retry policy defaults for transient provider failures.
@@ -179,6 +238,9 @@ func New(p Provider, t []Tool, cwd string, extraPrompt string) *Agent {
 		MaxTurns:       32,
 		MaxRetries:     DefaultMaxRetries,
 		RetryBaseDelay: DefaultRetryBaseDelay,
+		AutoCompact:    true,
+		CompactAt:      DefaultCompactAt,
+		KeepTurns:      DefaultKeepTurns,
 		Sleep:          sleepCtx,
 		OnEvent:        func(Event) {},
 	}
@@ -223,6 +285,11 @@ func (a *Agent) ModelName() string {
 func (a *Agent) SetModelName(name string) bool {
 	if s, ok := a.Provider.(ModelSetter); ok && name != "" {
 		s.SetModelName(name)
+		// The window belongs to the model, so the cached one no longer applies.
+		a.limitModel = ""
+		a.limitTokens = 0
+		a.limitSource = ""
+		a.measuredOK = false
 		return true
 	}
 	return false
@@ -254,7 +321,80 @@ func (a *Agent) Messages() []Message {
 }
 
 // Reset clears the conversation history (TUI /new).
-func (a *Agent) Reset() { a.History = nil }
+func (a *Agent) Reset() {
+	a.History = nil
+	a.compaction = nil
+	a.shortened = nil
+	a.measuredOK = false
+	a.autoDisabled = false
+}
+
+// SetHistory replaces the conversation, dropping any compaction and the
+// measured context figure: both describe a conversation that is being left.
+func (a *Agent) SetHistory(msgs []Message) {
+	a.History = append([]Message(nil), msgs...)
+	a.compaction = nil
+	a.shortened = nil
+	a.measuredOK = false
+	a.autoDisabled = false
+}
+
+// compactForContext runs an automatic compaction when the context has reached
+// the configured threshold. It runs at most once per turn and disables itself
+// for the session when compacting does not bring the context below the
+// threshold, so a run can never stall trying to shrink itself.
+func (a *Agent) compactForContext(ctx context.Context, emit func(Event)) {
+	if !a.AutoCompact || a.autoDisabled {
+		return
+	}
+	limit, _ := a.resolveLimit(ctx)
+	if limit <= 0 {
+		return
+	}
+	used, _ := a.UsedTokens()
+	if used*100 < limit*a.compactAt() {
+		return
+	}
+	// Tell the interface compaction is running now, so the status shows it for
+	// the duration of the summarization request.
+	a.compacting = true
+	a.emitContext(emit)
+	info, err := a.Compact(ctx, "", true)
+	a.compacting = false
+	if err != nil {
+		// A failed automatic compaction must not block the run: the request
+		// proceeds with the context as it is, and its own outcome is what the
+		// user sees.
+		switch {
+		case errors.Is(err, ErrNothingToCompact):
+			// Only the kept tail is left, so there is nothing to do and no
+			// reason to try again this session.
+			a.autoDisabled = true
+			a.emitContext(emit)
+			return
+		case ctx.Err() != nil:
+			// An abort during the summarization is not a failure of the
+			// context: the transcript says the compaction was cancelled, since
+			// the run's own failure notice is suppressed for an abort.
+			info.Note = "compaction cancelled, the context is unchanged"
+			emit(Event{Type: EventCompaction, Compaction: &info})
+			a.emitContext(emit)
+			return
+		}
+		info.Error = err.Error()
+		emit(Event{Type: EventCompaction, Compaction: &info})
+		a.emitContext(emit)
+		return
+	}
+	if after, _ := a.UsedTokens(); after*100 >= limit*a.compactAt() {
+		// Still full: the fixed part is large or the summarizable part is tiny.
+		// Sending and failing once beats summarizing repeatedly for no gain.
+		a.autoDisabled = true
+		info.Note = "automatic compaction is now off for this session: compacting did not free enough of the window"
+	}
+	emit(Event{Type: EventCompaction, Compaction: &info})
+	a.emitContext(emit)
+}
 
 // ToolNames lists the enabled tools in registration order.
 func (a *Agent) ToolNames() []string {
@@ -278,6 +418,13 @@ func (a *Agent) RunPrompt(ctx context.Context, prompt string, emit func(Event)) 
 		msg := NewUserMessage(prompt)
 		a.append(msg, emit)
 	}
+	// Resolve the window now, while a context that can reach the endpoint is in
+	// hand, and only then report it. Asking here rather than leaving it to the
+	// compaction check is what makes the first figure the model's real one: the
+	// check returns early when auto-compaction is off, so a run with it disabled
+	// would otherwise report the table's guess for the whole conversation.
+	a.resolveLimit(ctx)
+	a.emitContext(emit)
 	if a.Provider == nil {
 		err := fmt.Errorf("no model provider configured: set HAL_API_KEY or OPENAI_API_KEY")
 		emit(Event{Type: EventError, Error: err.Error()})
@@ -293,6 +440,11 @@ func (a *Agent) RunPrompt(ctx context.Context, prompt string, emit func(Event)) 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
+		// Before the request goes out, check whether the context has filled the
+		// window and compact if so. The check runs once per turn and never
+		// loops (see compactForContext).
+		a.compactForContext(ctx, emit)
 
 		var streamed strings.Builder
 		assistant, err := a.streamWithRetry(ctx, emit, func(delta string) {
@@ -317,6 +469,10 @@ func (a *Agent) RunPrompt(ctx context.Context, prompt string, emit func(Event)) 
 			emit(Event{Type: EventUsage, Usage: assistant.Usage})
 		}
 		a.append(assistant, emit)
+		// The provider has just reported the exact size of what it was sent, so
+		// the figure is measured until the next message is appended.
+		a.recordUsage(assistant.Usage)
+		a.emitContext(emit)
 
 		if len(assistant.ToolCalls) == 0 {
 			emit(Event{Type: EventDone})
@@ -368,19 +524,34 @@ func (a *Agent) retryBaseDelay() time.Duration {
 // after part of the answer had already been streamed are returned immediately:
 // retrying those would duplicate the text the user has already seen.
 func (a *Agent) streamWithRetry(ctx context.Context, emit func(Event), onText func(string)) (Message, error) {
-	max := a.maxRetries()
-	delay := a.retryBaseDelay()
-	for attempt := 0; ; attempt++ {
-		var streamed strings.Builder
-		msg, err := a.Provider.Stream(ctx, a.requestMessages(), a.toolSpecs(), func(delta string) {
+	var streamed strings.Builder
+	send := func() (Message, error) {
+		streamed.Reset()
+		return a.Provider.Stream(ctx, a.requestMessages(), a.toolSpecs(), func(delta string) {
 			streamed.WriteString(delta)
 			onText(delta)
 		})
+	}
+	return a.retryTransient(ctx, send, emit, func() int { return streamed.Len() })
+}
+
+// retryTransient applies the retry policy to one provider call: a transient
+// failure is waited out and retried, and each retry is reported to emit. A nil
+// emit is how a request that is not a turn (a summarization) is retried without
+// producing the turn's retry notices. streamed reports how much of the answer
+// the failed attempt already delivered; retrying would show it twice.
+func (a *Agent) retryTransient(ctx context.Context, send func() (Message, error), emit func(Event), streamed func() int) (Message, error) {
+	max := a.maxRetries()
+	delay := a.retryBaseDelay()
+	for attempt := 0; ; attempt++ {
+		msg, err := send()
 		if err == nil {
 			return msg, nil
 		}
-		if streamed.Len() > 0 {
-			return msg, fmt.Errorf("%w (the answer was cut off after %d characters)", err, streamed.Len())
+		if streamed != nil {
+			if n := streamed(); n > 0 {
+				return msg, fmt.Errorf("%w (the answer was cut off after %d characters)", err, n)
+			}
 		}
 
 		var retryable *RetryableError
@@ -395,13 +566,15 @@ func (a *Agent) streamWithRetry(ctx context.Context, emit func(Event), onText fu
 		if wait > maxRetryDelay {
 			wait = maxRetryDelay
 		}
-		emit(Event{
-			Type:        EventRetry,
-			Error:       err.Error(),
-			Attempt:     attempt + 1,
-			MaxAttempts: max,
-			RetryInMS:   int(wait / time.Millisecond),
-		})
+		if emit != nil {
+			emit(Event{
+				Type:        EventRetry,
+				Error:       err.Error(),
+				Attempt:     attempt + 1,
+				MaxAttempts: max,
+				RetryInMS:   int(wait / time.Millisecond),
+			})
+		}
 		sleep := a.Sleep
 		if sleep == nil {
 			sleep = sleepCtx
@@ -425,11 +598,11 @@ func (a *Agent) append(m Message, emit func(Event)) {
 }
 
 func (a *Agent) requestMessages() []Message {
-	msgs := make([]Message, 0, len(a.History)+1)
+	msgs := make([]Message, 0, len(a.History)+2)
 	if strings.TrimSpace(a.SystemPrompt) != "" {
 		msgs = append(msgs, Message{Role: RoleSystem, Content: a.SystemPrompt})
 	}
-	msgs = append(msgs, a.History...)
+	msgs = append(msgs, a.contextMessages()...)
 	return msgs
 }
 

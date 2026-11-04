@@ -64,6 +64,15 @@ type Agent interface {
 	Messages() []agent.Message
 	Reset()
 	ToolNames() []string
+	// ContextInfo reports the size of the next request against the window.
+	ContextInfo() agent.ContextInfo
+	// Compact replaces older messages with a summary.
+	Compact(ctx context.Context, instructions string, automatic bool) (agent.CompactionInfo, error)
+	// Summary is the active summary, or "" when there is none.
+	Summary() string
+	// ActiveContext is what the model is sent after a compaction: the summary,
+	// the messages after it, and how many messages the summary replaces.
+	ActiveContext() (summary string, messages []agent.Message, summarized int)
 }
 
 // Options configures the console.
@@ -134,6 +143,36 @@ type outEvent struct {
 	Version  string        `json:"version,omitempty"`
 	Tools    []string      `json:"tools,omitempty"`
 	Blocks   []Block       `json:"blocks,omitempty"`
+
+	// Context window figures, sent with status updates and snapshots.
+	CtxUsed   int    `json:"ctxUsed"`
+	CtxLimit  int    `json:"ctxLimit"`
+	CtxExact  bool   `json:"ctxExact"`
+	CtxSource string `json:"ctxSource,omitempty"`
+	// CtxCompactAt is the auto-compaction threshold, so the page colours the
+	// segment at the same point the agent acts, and CtxAutoCompact says whether
+	// anything acts on it at all.
+	CtxCompactAt   int  `json:"ctxCompactAt,omitempty"`
+	CtxAutoCompact bool `json:"ctxAutoCompact"`
+	// CtxCompacting reports that a compaction is running now.
+	CtxCompacting bool `json:"ctxCompacting,omitempty"`
+	// CtxSummary is the active summary, so /context summary needs no round trip.
+	CtxSummary string `json:"ctxSummary,omitempty"`
+	// CtxLastInput and CtxLastOutput are what the provider reported for the
+	// most recent request, for the /context breakdown.
+	CtxLastInput  int `json:"ctxLastInput,omitempty"`
+	CtxLastOutput int `json:"ctxLastOutput,omitempty"`
+	// The rest of the /context breakdown: the parts the context is assembled
+	// from, so a surprising figure can be explained without another request.
+	CtxSystem          int `json:"ctxSystem,omitempty"`
+	CtxTools           int `json:"ctxTools,omitempty"`
+	CtxSummaryTokens   int `json:"ctxSummaryTokens,omitempty"`
+	CtxSummaryMessages int `json:"ctxSummaryMessages,omitempty"`
+	CtxRecent          int `json:"ctxRecent,omitempty"`
+	CtxRecentMessages  int `json:"ctxRecentMessages,omitempty"`
+	CtxKeepTurns       int `json:"ctxKeepTurns,omitempty"`
+	// Compaction describes the compaction this event reports.
+	Compaction *agent.CompactionInfo `json:"compaction,omitempty"`
 }
 
 // sessionInfo is one entry of the page's session menu.
@@ -144,6 +183,9 @@ type sessionInfo struct {
 	Messages  int    `json:"messages"`
 	UpdatedAt string `json:"updatedAt,omitempty"`
 	Current   bool   `json:"current,omitempty"`
+	// Compacted marks a session whose active context is a summary, so the menu
+	// explains why it is shorter than its file.
+	Compacted bool `json:"compacted,omitempty"`
 }
 
 // Server holds the console state shared by every connected page.
@@ -161,11 +203,17 @@ type Server struct {
 	aborting bool
 	cancel   context.CancelFunc
 	queued   []string
-	status   string
-	usageIn  int
-	usageOut int
-	turns    int
-	lastErr  error
+	// queuedCommands holds /compact requests that arrived during a run.
+	queuedCommands []string
+	status         string
+	usageIn        int
+	usageOut       int
+	turns          int
+	lastErr        error
+	// ctx is the most recent context figures the agent reported. It is kept so
+	// statusLocked never has to read the agent while a run is in flight, which
+	// the run goroutine is mutating.
+	ctx agent.ContextInfo
 }
 
 // New builds the console, resolving its access token, restoring any stored
@@ -310,6 +358,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/model", s.auth(s.handleModel))
 	mux.HandleFunc("/api/sessions", s.auth(s.handleSessions))
 	mux.HandleFunc("/api/session/open", s.auth(s.handleOpen))
+	mux.HandleFunc("/api/compact", s.auth(s.handleCompact))
 	return mux
 }
 
@@ -406,7 +455,10 @@ func (s *Server) abortForSwitch() bool {
 		return false
 	}
 	s.aborting = true
+	// The queue, including any queued compaction, belonged to the turn and the
+	// conversation being left.
 	s.queued = nil
+	s.queuedCommands = nil
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -419,11 +471,30 @@ func (s *Server) isRunning() bool {
 	return s.running
 }
 
+// refreshContext re-reads the context figures from the agent. It must only be
+// called when no run is in flight, since the run goroutine owns the agent then;
+// during a run the figures come from the agent's context events instead.
+func (s *Server) refreshContext() {
+	if s.opts.Agent == nil {
+		return
+	}
+	ctx := s.opts.Agent.ContextInfo()
+	if ctx.SummaryText == "" {
+		ctx.SummaryText = s.opts.Agent.Summary()
+	}
+	s.mu.Lock()
+	s.ctx = ctx
+	s.mu.Unlock()
+}
+
 // seedFromHistory replaces the transcript with one rebuilt from the conversation
 // the agent holds, so a page that loads after a restart shows the whole session
 // instead of an empty console.
 func (s *Server) seedFromHistory() {
 	blocks := historyBlocks(s.opts.Agent)
+	// No run is in flight here: at startup, or after the previous one was
+	// waited out, so the agent may be read directly once.
+	s.refreshContext()
 	if len(blocks) > 0 {
 		blocks = append(blocks, Block{
 			Kind:  kindSystem,
@@ -446,8 +517,19 @@ func historyBlocks(a Agent) []Block {
 		return nil
 	}
 	var blocks []Block
+	summary, msgs, summarized := a.ActiveContext()
+	if summary != "" {
+		// The compacted messages are in the session file but not in the
+		// context, so the rebuilt transcript shows the summary, not a replay.
+		blocks = append(blocks, Block{
+			Kind:  kindSystem,
+			Title: "summary of earlier conversation",
+			Body:  fmt.Sprintf("%d earlier messages are summarized here and not replayed:\n\n%s", summarized, summary),
+			Done:  true,
+		})
+	}
 	toolAt := map[string]int{}
-	for _, m := range a.Messages() {
+	for _, m := range msgs {
 		switch m.Role {
 		case agent.RoleUser:
 			if strings.TrimSpace(m.Content) == "" {
@@ -556,6 +638,110 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleCompact compacts the conversation now, or queues the request when a
+// turn is in flight, exactly as the terminal UI does.
+func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "use POST")
+		return
+	}
+	var body struct {
+		Instructions string `json:"instructions"`
+	}
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	queued, err := s.Compact(body.Instructions)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "queued": queued})
+}
+
+// Compact compacts now when the console is idle, or queues the request when a
+// turn is running. It reports whether the request was queued.
+func (s *Server) Compact(instructions string) (bool, error) {
+	s.mu.Lock()
+	ag := s.opts.Agent
+	if ag == nil {
+		s.mu.Unlock()
+		return false, errors.New("no agent configured")
+	}
+	if s.running {
+		s.queuedCommands = append(s.queuedCommands, instructions)
+		s.blocks = append(s.blocks, Block{Kind: kindSystem, Title: "queued",
+			Body: "compaction runs after the current turn", Done: true})
+		s.broadcastLocked(outEvent{Type: "system", Title: "queued", Text: "compaction runs after the current turn"})
+		s.mu.Unlock()
+		return true, nil
+	}
+	s.mu.Unlock()
+
+	info, err := ag.Compact(context.Background(), instructions, false)
+	if err != nil && info.Error == "" && info.Note == "" {
+		info.Error = err.Error()
+	}
+	// The console is idle, so the figures can be refreshed from the agent.
+	s.refreshContext()
+	s.applyCompaction(info)
+	return false, nil
+}
+
+// applyCompaction records a compaction in the transcript and tells every page.
+func (s *Server) applyCompaction(info agent.CompactionInfo) {
+	body := compactionBody(info)
+	s.mu.Lock()
+	s.blocks = append(s.blocks, Block{Kind: kindSystem, Title: "context compacted", Body: body, Done: true})
+	ev := s.statusLocked("status")
+	ev.Compaction = &info
+	ev.Title = "context compacted"
+	ev.Text = body
+	s.broadcastLocked(ev)
+	s.mu.Unlock()
+}
+
+// compactionBody describes a compaction in one block of text.
+func compactionBody(info agent.CompactionInfo) string {
+	switch {
+	case info.Error != "":
+		return "compaction failed, the context is unchanged: " + info.Error
+	case info.Messages == 0:
+		return "nothing to compact yet: the conversation is still short"
+	}
+	what := "requested"
+	if info.Automatic {
+		what = "automatic"
+	}
+	kept := info.KeptTurns
+	if kept == 0 {
+		kept = agent.DefaultKeepTurns
+	}
+	line := fmt.Sprintf("%d messages summarized · %s → %s tokens · the %d most recent turns kept (%s)",
+		info.Messages, humanCount(info.Before), humanCount(info.After), kept, what)
+	if info.Shortened > 0 {
+		line += fmt.Sprintf("\n%d tool results shortened to fit the window", info.Shortened)
+	}
+	if info.Note != "" {
+		line += "\n" + info.Note
+	}
+	return line
+}
+
+func humanCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // handleSessions answers with the switchable sessions, for a page that wants to
@@ -702,6 +888,27 @@ func (s *Server) statusLocked(evType string) outEvent {
 		ev.Model = s.opts.Agent.ModelName()
 		ev.Provider = s.opts.Agent.ProviderName()
 		ev.Tools = s.opts.Agent.ToolNames()
+		// The figures come from the last event the agent emitted, not from a
+		// second call into it: the run goroutine owns the agent while a turn is
+		// in flight.
+		ctx := s.ctx
+		ev.CtxUsed = ctx.Used
+		ev.CtxLimit = ctx.Limit
+		ev.CtxExact = ctx.Exact
+		ev.CtxSource = ctx.Source
+		ev.CtxCompactAt = ctx.CompactAt
+		ev.CtxAutoCompact = ctx.AutoCompact
+		ev.CtxCompacting = ctx.Compacting
+		ev.CtxSummary = ctx.SummaryText
+		ev.CtxLastInput = ctx.LastInput
+		ev.CtxLastOutput = ctx.LastOutput
+		ev.CtxSystem = ctx.System
+		ev.CtxTools = ctx.Tools
+		ev.CtxSummaryTokens = ctx.Summary
+		ev.CtxSummaryMessages = ctx.SummaryMessages
+		ev.CtxRecent = ctx.Recent
+		ev.CtxRecentMessages = ctx.RecentMessages
+		ev.CtxKeepTurns = ctx.KeepTurns
 	}
 	if s.opts.SessionInfo != nil {
 		ev.Session = s.opts.SessionInfo()
@@ -731,6 +938,7 @@ func (s *Server) sessionsLocked() []sessionInfo {
 			Messages:  info.Messages,
 			UpdatedAt: info.UpdatedAt.Format(time.RFC3339),
 			Current:   info.ID == current,
+			Compacted: info.Compacted,
 		})
 	}
 	return out
@@ -849,6 +1057,24 @@ func (s *Server) applyEvent(ev agent.Event) {
 		body := fmt.Sprintf("%s — attempt %d of %d in %.1fs", ev.Error, ev.Attempt, ev.MaxAttempts, float64(ev.RetryInMS)/1000)
 		s.blocks = append(s.blocks, Block{Kind: kindSystem, Title: "retrying", Body: body, Done: true})
 		out = outEvent{Type: "system", Title: "retrying", Text: body}
+	case agent.EventContext, agent.EventCompaction:
+		// Both are folded into the console state: the context figure goes to
+		// the footer with every status update, and a compaction becomes a
+		// transcript block plus a notification.
+		if ev.Context != nil {
+			s.ctx = *ev.Context
+		}
+		if ev.Compaction != nil {
+			info := *ev.Compaction
+			body := compactionBody(info)
+			s.blocks = append(s.blocks, Block{Kind: kindSystem, Title: "context compacted", Body: body, Done: true})
+			out = s.statusLocked("status")
+			out.Compaction = &info
+			out.Title = "context compacted"
+			out.Text = body
+		} else {
+			out = s.statusLocked("status")
+		}
 	}
 	if out.Type != "" {
 		s.broadcastLocked(out)
@@ -878,8 +1104,24 @@ func (s *Server) finishRun(err error) {
 	} else {
 		s.status = "ready"
 	}
+	compactionWanted := len(s.queuedCommands) > 0 && len(s.queued) == 0
+	var instructions string
+	if compactionWanted {
+		instructions = s.queuedCommands[0]
+		s.queuedCommands = s.queuedCommands[1:]
+	}
 	s.broadcastLocked(s.statusLocked("status"))
 	s.mu.Unlock()
+
+	if compactionWanted && s.opts.Agent != nil {
+		// A queued compaction runs now that the turn it waited for is done.
+		info, err := s.opts.Agent.Compact(context.Background(), instructions, false)
+		if err != nil && info.Error == "" && info.Note == "" {
+			info.Error = err.Error()
+		}
+		s.refreshContext()
+		s.applyCompaction(info)
+	}
 }
 
 // Abort cancels the running turn, if any.
@@ -921,10 +1163,16 @@ func (s *Server) NewSession() error {
 		return errors.New("no agent configured")
 	}
 	s.opts.Agent.Reset()
+	// A queued compaction belongs to the conversation that is being dropped.
+	s.queuedCommands = nil
 	s.blocks = nil
 	s.cur, s.curTool = -1, -1
 	s.turns, s.usageIn, s.usageOut = 0, 0, 0
 	s.lastErr = nil
+	// /new resets the context: the figure and the summary both describe the
+	// conversation that was just left. The lock is already held, so the agent
+	// is read directly rather than through refreshContext.
+	s.ctx = s.opts.Agent.ContextInfo()
 	desc := ""
 	if s.opts.NewSession != nil {
 		d, err := s.opts.NewSession()
@@ -947,7 +1195,11 @@ func (s *Server) SetModel(name string) bool {
 	if !s.opts.Agent.SetModelName(name) {
 		return false
 	}
+	// The window belongs to the model, so the figures must be recomputed.
+	ctx := s.opts.Agent.ContextInfo()
+	ctx.SummaryText = s.opts.Agent.Summary()
 	s.mu.Lock()
+	s.ctx = ctx
 	s.blocks = append(s.blocks, Block{Kind: kindSystem, Title: "model", Body: "switched to " + name, Done: true})
 	s.broadcastLocked(outEvent{Type: "system", Title: "model", Text: "switched to " + name})
 	s.broadcastLocked(s.statusLocked("status"))

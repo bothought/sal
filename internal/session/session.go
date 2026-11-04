@@ -76,7 +76,7 @@ func ProjectDir(root, cwd string) string {
 
 // Entry is one line of a session file.
 type Entry struct {
-	Type      string         `json:"type"` // session | message | model_change | name
+	Type      string         `json:"type"` // session | message | model_change | name | compaction
 	ID        string         `json:"id"`
 	ParentID  string         `json:"parentId,omitempty"`
 	Timestamp string         `json:"timestamp"`
@@ -85,6 +85,26 @@ type Entry struct {
 	Model     string         `json:"model,omitempty"`
 	Name      string         `json:"name,omitempty"`
 	Message   *agent.Message `json:"message,omitempty"`
+	// Compacted records a context compaction; see Compaction.
+	Compacted *Compaction `json:"compacted,omitempty"`
+}
+
+// Compaction is a recorded compaction: the summary that replaced a prefix of
+// the conversation, and which messages it covers. The messages themselves stay
+// in the file, so the log remains a complete record and only the active context
+// is smaller.
+type Compaction struct {
+	Summary string `json:"summary"`
+	// Through is the id of the last message the summary replaces. It is an id
+	// rather than an index so it survives any change in how messages are
+	// counted.
+	Through  string `json:"through"`
+	Messages int    `json:"messages"`
+	// Shortened is how many tool results in the kept tail were replaced with a
+	// marker, and ShortenedIDs names the messages they were, so a resumed
+	// session sends the same context the running one did.
+	Shortened    int      `json:"shortened,omitempty"`
+	ShortenedIDs []string `json:"shortenedIds,omitempty"`
 }
 
 // Info summarises a stored session.
@@ -96,6 +116,9 @@ type Info struct {
 	Model     string
 	Messages  int
 	UpdatedAt time.Time
+	// Compacted reports that the session has a recorded compaction, so a
+	// switcher can show why it is shorter than its file.
+	Compacted bool
 }
 
 // Session is an append-only conversation log.
@@ -106,12 +129,16 @@ type Session struct {
 	Model    string
 	Path     string
 	Messages []agent.Message
+	// Compaction is the recorded compaction, or nil when the context is the
+	// whole conversation.
+	Compaction *Compaction
 	// UpdatedAt is the timestamp of the newest entry, used to order sessions.
 	UpdatedAt time.Time
 
-	mu     sync.Mutex
-	lastID string
-	file   *os.File
+	mu         sync.Mutex
+	lastID     string
+	file       *os.File
+	messageIDs []string
 }
 
 var (
@@ -145,7 +172,7 @@ func New(root, cwd, name, model string) (*Session, error) {
 		return nil, err
 	}
 	header := Entry{Type: "session", ID: newID(), Timestamp: now(), SessionID: id, Cwd: abs, Model: model, Name: name}
-	if err := s.write(header); err != nil {
+	if _, err := s.write(header); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -160,7 +187,7 @@ func (s *Session) open() error {
 	return nil
 }
 
-func (s *Session) write(e Entry) error {
+func (s *Session) write(e Entry) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e.ID == "" {
@@ -174,15 +201,15 @@ func (s *Session) write(e Entry) error {
 	}
 	if s.file == nil {
 		if err := s.open(); err != nil {
-			return err
+			return "", err
 		}
 	}
 	data, err := json.Marshal(e)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := s.file.Write(append(data, '\n')); err != nil {
-		return err
+		return "", err
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, e.Timestamp); err == nil {
 		s.UpdatedAt = ts
@@ -190,7 +217,7 @@ func (s *Session) write(e Entry) error {
 		s.UpdatedAt = time.Now()
 	}
 	s.lastID = e.ID
-	return nil
+	return e.ID, nil
 }
 
 // AppendMessage records a conversation message and keeps the in-memory history.
@@ -200,7 +227,73 @@ func (s *Session) AppendMessage(m agent.Message) error {
 	if s.file == nil {
 		return nil // ephemeral modes (-p/--no-session) may have no file
 	}
-	return s.write(Entry{Type: "message", Message: &msg})
+	id, err := s.write(Entry{Type: "message", Message: &msg})
+	if err != nil {
+		return err
+	}
+	s.messageIDs = append(s.messageIDs, id)
+	return nil
+}
+
+// MessageID returns the stored id of the message at index i, or "" when it is
+// unknown (an ephemeral session, or an index outside the conversation). It is
+// what a compaction records so the summary can be tied back to the messages it
+// covers.
+func (s *Session) MessageID(i int) string {
+	if i < 0 || i >= len(s.messageIDs) {
+		return ""
+	}
+	return s.messageIDs[i]
+}
+
+// MessageIDs is MessageID for a list of indexes, skipping the ones it cannot
+// resolve, so a compaction can record a set of messages by identity.
+func (s *Session) MessageIDs(indexes []int) []string {
+	if len(indexes) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(indexes))
+	for _, i := range indexes {
+		if id := s.MessageID(i); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// CompactionIndex is the index in Messages of the last message a recorded
+// compaction covers, or -1 when there is no compaction or it cannot be located.
+func (s *Session) CompactionIndex() int {
+	if s.Compaction == nil || s.Compaction.Through == "" {
+		return -1
+	}
+	return s.indexByID(s.Compaction.Through)
+}
+
+// CompactionShortenedIndexes maps the recorded shortened tool results back to
+// their positions in Messages, skipping any whose id is no longer present.
+func (s *Session) CompactionShortenedIndexes() []int {
+	if s.Compaction == nil || len(s.Compaction.ShortenedIDs) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(s.Compaction.ShortenedIDs))
+	for _, id := range s.Compaction.ShortenedIDs {
+		if i := s.indexByID(id); i >= 0 {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// indexByID is the position in Messages of the message with the given stored
+// id, or -1.
+func (s *Session) indexByID(id string) int {
+	for i, got := range s.messageIDs {
+		if got == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // SetName records a new display name.
@@ -209,7 +302,25 @@ func (s *Session) SetName(name string) error {
 	if s.file == nil {
 		return nil
 	}
-	return s.write(Entry{Type: "name", Name: name})
+	_, err := s.write(Entry{Type: "name", Name: name})
+	return err
+}
+
+// AppendCompaction records that a summary replaced a prefix of the
+// conversation. The messages it covers stay in the file; this entry is what
+// makes the active context smaller on resume. throughID is the id of the last
+// message the summary replaces.
+func (s *Session) AppendCompaction(c Compaction, throughID string) error {
+	if c.Through == "" {
+		c.Through = throughID
+	}
+	s.Compaction = &c
+	if s.file == nil {
+		return nil
+	}
+	entry := c
+	_, err := s.write(Entry{Type: "compaction", Compacted: &entry})
+	return err
 }
 
 // SetModel records a model switch.
@@ -218,7 +329,8 @@ func (s *Session) SetModel(model string) error {
 	if s.file == nil {
 		return nil
 	}
-	return s.write(Entry{Type: "model_change", Model: model})
+	_, err := s.write(Entry{Type: "model_change", Model: model})
+	return err
 }
 
 // Close flushes and closes the session file.
@@ -262,11 +374,17 @@ func Load(path string) (*Session, error) {
 		case "message":
 			if e.Message != nil {
 				s.Messages = append(s.Messages, *e.Message)
+				s.messageIDs = append(s.messageIDs, e.ID)
 			}
 		case "name":
 			s.Name = e.Name
 		case "model_change":
 			s.Model = e.Model
+		case "compaction":
+			if e.Compacted != nil {
+				c := *e.Compacted
+				s.Compaction = &c
+			}
 		}
 		if e.ID != "" {
 			s.lastID = e.ID
@@ -430,6 +548,7 @@ func stat(path string) (Info, error) {
 	info.Cwd = s.Cwd
 	info.Model = s.Model
 	info.Messages = len(s.Messages)
+	info.Compacted = s.Compaction != nil
 	if !s.UpdatedAt.IsZero() {
 		info.UpdatedAt = s.UpdatedAt
 	}

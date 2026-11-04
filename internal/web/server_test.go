@@ -21,28 +21,48 @@ import (
 
 // fakeAgent is a scripted stand-in for *agent.Agent.
 type fakeAgent struct {
-	mu       sync.Mutex
-	model    string
-	script   []agent.Event
-	blocking bool
-	failWith error
-	prompts  []string
-	aborted  bool
-	resets   int
-	history  []agent.Message
+	mu         sync.Mutex
+	model      string
+	script     []agent.Event
+	blocking   bool
+	failWith   error
+	prompts    []string
+	aborted    bool
+	resets     int
+	history    []agent.Message
+	ctxInfo    agent.ContextInfo
+	summary    string
+	summarized int
+	compacts   []string
+	// release unblocks a blocking run without cancelling it.
+	release chan struct{}
 }
 
 func (f *fakeAgent) RunPrompt(ctx context.Context, prompt string, emit func(agent.Event)) error {
 	f.mu.Lock()
 	f.prompts = append(f.prompts, prompt)
 	script := append([]agent.Event(nil), f.script...)
-	blocking, failWith := f.blocking, f.failWith
+	blocking, failWith, release := f.blocking, f.failWith, f.release
 	f.mu.Unlock()
 
 	for _, ev := range script {
 		emit(ev)
 	}
 	if blocking {
+		if release != nil {
+			// A run that can be let go without being cancelled.
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			if ctx.Err() != nil {
+				f.mu.Lock()
+				f.aborted = true
+				f.mu.Unlock()
+				return ctx.Err()
+			}
+			return nil
+		}
 		<-ctx.Done()
 		f.mu.Lock()
 		f.aborted = true
@@ -67,7 +87,32 @@ func (f *fakeAgent) ModelName() string {
 func (f *fakeAgent) SetModelName(m string) bool { f.mu.Lock(); f.model = m; f.mu.Unlock(); return true }
 func (f *fakeAgent) ProviderName() string       { return "fake" }
 func (f *fakeAgent) Reset()                     { f.mu.Lock(); f.resets++; f.mu.Unlock() }
-func (f *fakeAgent) ToolNames() []string        { return []string{"read", "bash"} }
+
+func (f *fakeAgent) ContextInfo() agent.ContextInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ctxInfo
+}
+
+func (f *fakeAgent) Summary() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.summary
+}
+
+func (f *fakeAgent) ActiveContext() (string, []agent.Message, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.summary, append([]agent.Message(nil), f.history...), f.summarized
+}
+
+func (f *fakeAgent) Compact(_ context.Context, instructions string, automatic bool) (agent.CompactionInfo, error) {
+	f.mu.Lock()
+	f.compacts = append(f.compacts, instructions)
+	f.mu.Unlock()
+	return agent.CompactionInfo{Messages: 9, Before: 105000, After: 24000, Automatic: automatic}, nil
+}
+func (f *fakeAgent) ToolNames() []string { return []string{"read", "bash"} }
 
 func (f *fakeAgent) Messages() []agent.Message {
 	f.mu.Lock()
@@ -144,19 +189,38 @@ func connectSSE(t *testing.T, base, token string) *sseStream {
 // passes. Interior events are discarded.
 func (s *sseStream) waitFor(t *testing.T, kind string) outEvent {
 	t.Helper()
+	return s.waitForMatch(t, func(ev outEvent) bool { return ev.Type == kind }, kind)
+}
+
+// waitForMatch blocks until an event satisfying match arrives.
+func (s *sseStream) waitForMatch(t *testing.T, match func(outEvent) bool, what string) outEvent {
+	t.Helper()
 	deadline := time.After(5 * time.Second)
 	var seen []string
 	for {
 		select {
 		case ev := <-s.events:
-			if ev.Type == kind {
+			if match(ev) {
 				return ev
 			}
 			seen = append(seen, ev.Type)
 		case <-deadline:
-			t.Fatalf("timed out waiting for %q event (saw %v)", kind, seen)
+			t.Fatalf("timed out waiting for %s (saw %v)", what, seen)
 		}
 	}
+}
+
+// waitFor blocks until cond is true, or the deadline passes.
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 func (s *sseStream) close() { s.cancel() }
@@ -1060,5 +1124,301 @@ func TestSwitchDropsTheQueueOfTheAbandonedTurn(t *testing.T) {
 	}
 	if srv.isRunning() {
 		t.Fatal("no turn should be running after the switch")
+	}
+}
+
+func TestSnapshotCarriesTheContextFigures(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{
+		Used: 12000, Limit: 128000, Exact: true, Source: agent.LimitFromTable,
+		AutoCompact: true, CompactAt: 80,
+	}}
+	srv := newTestServer(t, fa)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	stream := connectSSE(t, ts.URL, srv.Token())
+	defer stream.close()
+	snapshot := stream.waitFor(t, "state")
+	if snapshot.CtxUsed != 12000 || snapshot.CtxLimit != 128000 || !snapshot.CtxExact {
+		t.Fatalf("context figures missing from the snapshot: %+v", snapshot)
+	}
+	if snapshot.CtxSource != agent.LimitFromTable || snapshot.CtxCompactAt != 80 {
+		t.Fatalf("provenance missing from the snapshot: %+v", snapshot)
+	}
+}
+
+func TestCompactEndpointRunsAndBroadcasts(t *testing.T) {
+	fa := &fakeAgent{}
+	srv := newTestServer(t, fa)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	stream := connectSSE(t, ts.URL, srv.Token())
+	defer stream.close()
+	stream.waitFor(t, "state")
+
+	resp := post(t, ts.URL, srv.Token(), "/api/compact", `{"instructions":"keep the parser work"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("compact status = %d", resp.StatusCode)
+	}
+
+	fa.mu.Lock()
+	got := append([]string(nil), fa.compacts...)
+	fa.mu.Unlock()
+	if len(got) != 1 || got[0] != "keep the parser work" {
+		t.Fatalf("instructions were not passed: %v", got)
+	}
+
+	ev := stream.waitForMatch(t, func(e outEvent) bool { return e.Compaction != nil }, "a compaction event")
+	if ev.Title != "context compacted" || ev.Compaction.Messages != 9 {
+		t.Fatalf("the page was not told: %+v", ev)
+	}
+	if !strings.Contains(ev.Text, "9 messages summarized") {
+		t.Fatalf("notification body: %q", ev.Text)
+	}
+}
+
+func TestCompactEndpointQueuesWhileRunning(t *testing.T) {
+	release := make(chan struct{})
+	fa := &fakeAgent{blocking: true, release: release}
+	srv := newTestServer(t, fa)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	if _, err := srv.Submit("first"); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := post(t, ts.URL, srv.Token(), "/api/compact", `{}`)
+	var res map[string]bool
+	_ = json.NewDecoder(resp.Body).Decode(&res)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("compact status = %d", resp.StatusCode)
+	}
+	if !res["queued"] {
+		t.Fatalf("compaction should be queued during a run: %v", res)
+	}
+	fa.mu.Lock()
+	n := len(fa.compacts)
+	fa.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("it must not compact mid-turn: %d", n)
+	}
+
+	// The queued compaction runs once the turn it waited for finished.
+	close(release)
+	waitFor(t, func() bool {
+		fa.mu.Lock()
+		defer fa.mu.Unlock()
+		return len(fa.compacts) == 1
+	}, "the queued compaction to run")
+}
+
+func TestCompactEndpointRequiresToken(t *testing.T) {
+	fa := &fakeAgent{}
+	srv := newTestServer(t, fa)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := post(t, ts.URL, "wrong", "/api/compact", `{}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("want 403, got %d", resp.StatusCode)
+	}
+	if len(fa.compacts) != 0 {
+		t.Fatal("an unauthenticated request must not compact")
+	}
+}
+
+func TestCompactionEventBecomesATranscriptBlock(t *testing.T) {
+	fa := &fakeAgent{}
+	srv := newTestServer(t, fa)
+	info := agent.CompactionInfo{Messages: 18, Before: 105000, After: 24000, Automatic: true}
+	srv.applyEvent(agent.Event{Type: agent.EventCompaction, Compaction: &info})
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	found := false
+	for _, b := range srv.blocks {
+		if b.Title == "context compacted" {
+			found = true
+			if !strings.Contains(b.Body, "18 messages summarized") || !strings.Contains(b.Body, "automatic") {
+				t.Fatalf("block body: %q", b.Body)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the compaction should appear in the transcript")
+	}
+}
+
+func TestSnapshotCarriesTheSummaryAndLastRequest(t *testing.T) {
+	fa := &fakeAgent{
+		summary: "we fixed the parser",
+		ctxInfo: agent.ContextInfo{
+			Used: 12000, Limit: 128000, Exact: true, AutoCompact: true, CompactAt: 80,
+			LastInput: 11980, LastOutput: 20,
+		},
+	}
+	srv := newTestServer(t, fa)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	stream := connectSSE(t, ts.URL, srv.Token())
+	defer stream.close()
+	ev := stream.waitFor(t, "state")
+	if ev.CtxSummary != "we fixed the parser" {
+		t.Fatalf("/context summary would have nothing to print: %+v", ev)
+	}
+	if ev.CtxLastInput != 11980 || ev.CtxLastOutput != 20 {
+		t.Fatalf("the last request is missing: %+v", ev)
+	}
+}
+
+func TestCompactingIsReportedToThePage(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{
+		Used: 105000, Limit: 128000, Exact: true, Compacting: true,
+	}}
+	srv := newTestServer(t, fa)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	stream := connectSSE(t, ts.URL, srv.Token())
+	defer stream.close()
+	if ev := stream.waitFor(t, "state"); !ev.CtxCompacting {
+		t.Fatalf("the page should be told compaction is running: %+v", ev)
+	}
+}
+
+func TestSessionMenuMarksACompactedSession(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
+		o.SessionID = func() string { return "aaaa000011112222" }
+		o.ListSessions = func() []session.Info {
+			return []session.Info{
+				{ID: "aaaa000011112222", Messages: 9, Compacted: true},
+				{ID: "bbbb111122223333", Messages: 4},
+			}
+		}
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := post(t, ts.URL, srv.Token(), "/api/sessions", `{}`)
+	defer resp.Body.Close()
+	var body struct {
+		Sessions []sessionInfo `json:"sessions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Sessions) != 2 || !body.Sessions[0].Compacted || body.Sessions[1].Compacted {
+		t.Fatalf("compacted flags = %+v", body.Sessions)
+	}
+}
+
+func TestHistoryBlocksShowTheSummaryNotTheCompactedMessages(t *testing.T) {
+	fa := &fakeAgent{summary: "we fixed the parser", summarized: 4}
+	fa.setHistory(
+		agent.NewUserMessage("the recent question"),
+		agent.Message{Role: agent.RoleAssistant, Content: "the recent answer"},
+	)
+	blocks := historyBlocks(fa)
+	if len(blocks) == 0 {
+		t.Fatal("no blocks")
+	}
+	if blocks[0].Title != "summary of earlier conversation" ||
+		!strings.Contains(blocks[0].Body, "we fixed the parser") ||
+		!strings.Contains(blocks[0].Body, "4 earlier messages") {
+		t.Fatalf("the first block should be the summary: %+v", blocks[0])
+	}
+	foundKept := false
+	for _, b := range blocks {
+		if b.Body == "the recent question" {
+			foundKept = true
+		}
+	}
+	if !foundKept {
+		t.Fatalf("the kept messages should still be replayed: %+v", blocks)
+	}
+}
+
+// TestSnapshotCarriesTheAutomaticCompactionFlag pins that the page can tell
+// "no compaction is configured" from "the threshold is 0": the breakdown must
+// not claim automatic compaction is on when it is off.
+func TestSnapshotCarriesTheAutomaticCompactionFlag(t *testing.T) {
+	fa := &fakeAgent{ctxInfo: agent.ContextInfo{
+		Used: 12000, Limit: 128000, CompactAt: 80, AutoCompact: false,
+	}}
+	srv := newTestServer(t, fa)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	stream := connectSSE(t, ts.URL, srv.Token())
+	defer stream.close()
+	snapshot := stream.waitFor(t, "state")
+	if snapshot.CtxAutoCompact {
+		t.Fatalf("automatic compaction is off, the page should know: %+v", snapshot)
+	}
+	if snapshot.CtxCompactAt != 80 {
+		t.Fatalf("the threshold is still reported: %+v", snapshot)
+	}
+}
+
+// TestQueuedCompactionIsDroppedByASessionSwitch pins §4.7: a compaction queued
+// during a run belongs to the conversation that submitted it, so switching
+// sessions drops it instead of compacting the one being opened.
+func TestQueuedCompactionIsDroppedByASessionSwitch(t *testing.T) {
+	release := make(chan struct{})
+	fa := &fakeAgent{blocking: true, release: release}
+	var opened string
+	srv := newTestServer(t, fa, func(o *Options) {
+		o.SessionID = func() string { return "current" }
+		o.OpenSession = func(id string) (string, error) {
+			opened = id
+			return "session " + id, nil
+		}
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	if _, err := srv.Submit("first"); err != nil {
+		t.Fatal(err)
+	}
+	resp := post(t, ts.URL, srv.Token(), "/api/compact", `{}`)
+	var res map[string]bool
+	_ = json.NewDecoder(resp.Body).Decode(&res)
+	resp.Body.Close()
+	if !res["queued"] {
+		t.Fatalf("the compaction should have been queued: %v", res)
+	}
+
+	if err := srv.OpenSession("other"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	// Give the finished run every chance to run a compaction it should not.
+	waitFor(t, func() bool { return !srv.isRunning() }, "the run to finish")
+	time.Sleep(50 * time.Millisecond)
+
+	if opened != "other" {
+		t.Fatalf("session not opened: %q", opened)
+	}
+	fa.mu.Lock()
+	defer fa.mu.Unlock()
+	if len(fa.compacts) != 0 {
+		t.Fatalf("a queued compaction must not run against the next session: %v", fa.compacts)
+	}
+}
+
+// TestCompactionBlockReportsTheKeptTurns pins the notification's figures in the
+// console as well as the terminal.
+func TestCompactionBlockReportsTheKeptTurns(t *testing.T) {
+	body := compactionBody(agent.CompactionInfo{
+		Messages: 9, Before: 105000, After: 24000, KeptTurns: 2, Automatic: true,
+	})
+	if !strings.Contains(body, "the 2 most recent turns kept") {
+		t.Fatalf("the block should report the turns it kept: %q", body)
 	}
 }

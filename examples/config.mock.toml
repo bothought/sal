@@ -14,8 +14,12 @@ model    = "mock-model"
 # A stub server that speaks the OpenAI chat-completions protocol with streaming.
 base_url = "http://127.0.0.1:8792/v1"
 
-# Local stub servers usually ignore the key, but hal sends it when present.
-api_key = "mock-key"
+# A local stub server does not check credentials, so no key is set: with an
+# empty one hal sends no Authorization header at all. If your server insists on
+# a value, export HAL_API_KEY (or name a variable with api_key_env) rather than
+# putting a literal key here. A committed file is checked out world-readable, and
+# hal warns about a readable file that contains an api_key.
+api_key = ""
 
 # Keep the mock honest: fewer turns, and only the tools a test needs.
 tools     = "read,write,edit,bash,grep,find,ls"

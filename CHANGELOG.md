@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Context window tracking and compaction.** The terminal footer and the web
+  console now show `ctx used/limit percent` for the next request, distinct from
+  the cumulative `↑`/`↓` counters. The figure is measured from the token counts
+  the provider reports and estimated (marked `~`) for what was appended since.
+  The window resolves from `--context-window` / `context_window` (accepting
+  `128k`, `1m`), then the endpoint's model metadata, then a small built-in
+  table, then 128k. When the window fills, older messages are replaced by a
+  summary — automatically at `--compact-at` (80% by default), or with
+  `/compact [notes]`; `--no-auto-compact` turns the automatic trigger off. The
+  most recent three turns are kept verbatim, the system prompt and tool
+  definitions are never compacted, and the visible transcript is not rewritten.
+  `/context` explains the figure and `/context summary` prints the summary. A
+  summary that fails leaves the context unchanged, and automatic compaction
+  disables itself rather than looping. Session files keep every message and
+  record the compaction, so resuming continues from the summary and still sends
+  the tool results the compaction had shortened; the session switcher marks a
+  compacted session.
+
 - **Session switching.** `/switch` in the TUI opens a picker of the sessions
   stored for the directory (`↑`/`↓`, `enter`, `esc`), `/switch <id>` opens one
   directly, and `/sessions` lists them; switching aborts a turn in flight and
@@ -36,6 +54,18 @@ All notable changes to this project are documented here. The format follows
   is bounded, which a whole-request timeout would have covered too.
 - The TUI session picker fits the terminal: entries are clipped and the list is
   windowed to the height, so a narrow or short terminal no longer overflows.
+- The context window published by a gateway is now found again. Two faults made
+  a real `1M` window fall back to the built-in table (and so to `65k` for a
+  `deepseek` model): the metadata read was capped at a failure message's 8 KiB,
+  which truncates a full model catalogue into unparseable JSON, and the
+  `{"limit":{"context":N}}` nesting that opencode.ai and other
+  OpenAI-compatible catalogues use was not read at all. `/context` now reports
+  the endpoint's own figure with `from the endpoint`.
+- The context window is now resolved at the start of a run, not only inside the
+  automatic-compaction check. That check returns early when `auto_compact` is
+  off, so a run with it disabled reported the built-in table's figure (and so
+  `65k` for a `deepseek` model) for the whole conversation, even though the
+  endpoint publishes the real one.
 - The web console reuses its access token from
   `$XDG_STATE_HOME/hal/web-token` (overridable with `--web-token` or
   `$HAL_WEB_TOKEN`), so a restarted process keeps serving a page that is already

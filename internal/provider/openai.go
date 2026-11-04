@@ -17,6 +17,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Rushera/hal/internal/agent"
@@ -36,6 +37,11 @@ const (
 	HeaderTimeout = 60 * time.Second
 	// maxErrorBody caps how much of a failed response is read for the message.
 	maxErrorBody = 8192
+	// maxModelsBody caps the /models metadata read. It is much larger than a
+	// failure message: a gateway that serves the whole catalogue answers with
+	// dozens of models and their limits, and a truncated body does not decode,
+	// which would silently look like "no limit published".
+	maxModelsBody = 4 << 20
 	// maxIdleConnsPerHost keeps a gateway's connections warm, which matters for
 	// the retries above: a fresh connection to a flaky endpoint may reset again.
 	maxIdleConnsPerHost = 8
@@ -62,6 +68,19 @@ type OpenAI struct {
 	SessionID string
 	// SessionHeader names the header carrying SessionID. Empty disables it.
 	SessionHeader string
+
+	// limit caches the model-metadata answer for ContextWindow. It is a pointer
+	// so that a shallow copy (WithHeaderTimeout) does not copy a sync.Once.
+	limit *modelLimit
+}
+
+// modelLimit is the memoized result of one /models lookup, including the
+// "nothing published" case: a missing limit is not a failure, so an endpoint
+// that does not answer is not asked again.
+type modelLimit struct {
+	once   sync.Once
+	tokens int
+	found  bool
 }
 
 // NewFromEnv builds a provider from environment variables/flags. Precedence:
@@ -127,7 +146,11 @@ func (o *OpenAI) Name() string      { return "openai-compatible" }
 func (o *OpenAI) ModelName() string { return o.Model }
 
 // SetModelName switches the model at runtime (TUI /model).
-func (o *OpenAI) SetModelName(m string) { o.Model = m }
+func (o *OpenAI) SetModelName(m string) {
+	o.Model = m
+	// The cached context window belongs to the previous model.
+	o.limit = nil
+}
 
 // SetSessionID updates the session affinity id sent to the provider.
 func (o *OpenAI) SetSessionID(id string) { o.SessionID = id }
@@ -524,4 +547,98 @@ func (o *OpenAI) WithHeaderTimeout(d time.Duration) *OpenAI {
 	cp := *o
 	cp.HTTPClient = newHTTPClient(d)
 	return &cp
+}
+
+// ContextWindow reports the model's context window when the endpoint publishes
+// one. It reads {base}/models once and caches the answer, including the
+// "nothing published" case: a missing limit is not a failure, so an endpoint
+// that does not answer is simply not asked again.
+func (o *OpenAI) ContextWindow(ctx context.Context) (int, bool) {
+	if o.limit == nil {
+		o.limit = &modelLimit{}
+	}
+	o.limit.once.Do(func() {
+		o.limit.tokens, o.limit.found = o.fetchContextWindow(ctx)
+	})
+	if !o.limit.found {
+		return 0, false
+	}
+	return o.limit.tokens, true
+}
+
+func (o *OpenAI) fetchContextWindow(ctx context.Context) (int, bool) {
+	if o.Model == "" {
+		return 0, false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.BaseURL+"/models", nil)
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("Accept", "application/json")
+	if o.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+o.APIKey)
+	}
+	if o.UserAgent != "" {
+		req.Header.Set("User-Agent", o.UserAgent)
+	}
+	resp, err := o.client().Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return 0, false
+	}
+	var body modelsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxModelsBody)).Decode(&body); err != nil {
+		return 0, false
+	}
+	return body.limitFor(o.Model)
+}
+
+// modelsResponse is the /models payload. Servers that publish a context limit
+// disagree on the field name and on the nesting, so every shape seen in the
+// wild is accepted and anything else is treated as "not published".
+type modelsResponse struct {
+	Data []struct {
+		ID      string `json:"id"`
+		Context int    `json:"context_length"`
+		// The OpenAI-compatible catalogue form (opencode.ai among others):
+		// {"limit":{"context":N,"output":N}}.
+		Limit struct {
+			Context int `json:"context"`
+			Output  int `json:"output"`
+		} `json:"limit"`
+		// Nested forms: {"top_provider":{"context_length":N}} and
+		// {"limits":{"context":N}}.
+		TopProvider struct {
+			ContextLength int `json:"context_length"`
+			MaxInput      int `json:"max_input_tokens"`
+		} `json:"top_provider"`
+		Limits struct {
+			Context int `json:"context"`
+			MaxIn   int `json:"max_context_length"`
+		} `json:"limits"`
+	} `json:"data"`
+	// Some gateways answer with a bare map of model id to limit.
+	Models map[string]struct {
+		Context int `json:"context_length"`
+	} `json:"models"`
+}
+
+func (m modelsResponse) limitFor(model string) (int, bool) {
+	for _, d := range m.Data {
+		if d.ID != model {
+			continue
+		}
+		for _, n := range []int{d.Context, d.Limit.Context, d.TopProvider.ContextLength, d.TopProvider.MaxInput, d.Limits.Context, d.Limits.MaxIn} {
+			if n > 0 {
+				return n, true
+			}
+		}
+	}
+	if e, ok := m.Models[model]; ok && e.Context > 0 {
+		return e.Context, true
+	}
+	return 0, false
 }

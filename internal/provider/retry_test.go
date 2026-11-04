@@ -334,3 +334,110 @@ func TestClassifyRequestErrorMarksResets(t *testing.T) {
 		t.Fatalf("a permanent failure must not be retryable: %v", permanent)
 	}
 }
+
+func TestContextWindowFromModelMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[{"id":"other","context_length":1000},`+
+			`{"id":"m","top_provider":{"context_length":32000}}]}`)
+	}))
+	defer srv.Close()
+
+	o := NewFromEnv("k", srv.URL, "m")
+	got, ok := o.ContextWindow(context.Background())
+	if !ok || got != 32000 {
+		t.Fatalf("window = %d %v", got, ok)
+	}
+	// The lookup is memoized, so a second call does not depend on the server.
+	srv.Close()
+	if got, ok := o.ContextWindow(context.Background()); !ok || got != 32000 {
+		t.Fatalf("cached window = %d %v", got, ok)
+	}
+}
+
+func TestContextWindowIsNotPublished(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			http.Error(w, "no", http.StatusNotFound)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	o := NewFromEnv("k", srv.URL, "m")
+	if n, ok := o.ContextWindow(context.Background()); ok {
+		t.Fatalf("a missing limit is not a failure to report: %d", n)
+	}
+}
+
+func TestModelSwitchForgetsTheCachedWindow(t *testing.T) {
+	o := NewFromEnv("k", "http://127.0.0.1:1", "a")
+	// Nothing listens, so the lookup fails; the point is that the cached "not
+	// published" answer is discarded when the model changes.
+	if _, ok := o.ContextWindow(context.Background()); ok {
+		t.Skip("a lookup unexpectedly succeeded")
+	}
+	o.SetModelName("b")
+	if o.limit != nil {
+		t.Fatal("switching models should forget the cached window")
+	}
+}
+
+// TestContextWindowFromLimitObject covers the catalogue form a gateway such as
+// opencode.ai answers with, {"limit":{"context":N,"output":N}}, which nests the
+// figure one level away from context_length.
+func TestContextWindowFromLimitObject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"object":"list","data":[`+
+			`{"id":"other","limit":{"context":200000,"output":8192}},`+
+			`{"id":"m","context_length":0,"limit":{"context":1000000,"output":384000}}]}`)
+	}))
+	defer srv.Close()
+
+	o := NewFromEnv("k", srv.URL, "m")
+	got, ok := o.ContextWindow(context.Background())
+	if !ok || got != 1000000 {
+		t.Fatalf("window = %d %v, want 1000000", got, ok)
+	}
+}
+
+// TestContextWindowSurvivesALongCatalogue guards the size of the metadata read:
+// a catalogue bigger than a failure-message body must still decode, because a
+// truncated body is indistinguishable from "no limit published" and would drop
+// resolution to the built-in table.
+func TestContextWindowSurvivesALongCatalogue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		var b strings.Builder
+		b.WriteString(`{"object":"list","data":[`)
+		// Roughly 32 KiB of unrelated models, then the one asked for: enough to
+		// overflow maxErrorBody but not a real catalogue.
+		for i := 0; i < 200; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"id":"filler-%03d","object":"model","owned_by":"gateway",`+
+				`"description":"%s","limit":{"context":128000,"output":8192}}`, i, strings.Repeat("x", 100))
+		}
+		b.WriteString(`,{"id":"m","limit":{"context":1000000}}]}`)
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer srv.Close()
+
+	o := NewFromEnv("k", srv.URL, "m")
+	got, ok := o.ContextWindow(context.Background())
+	if !ok || got != 1000000 {
+		t.Fatalf("window = %d %v, want 1000000", got, ok)
+	}
+}

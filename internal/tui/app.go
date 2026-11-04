@@ -31,6 +31,15 @@ type Agent interface {
 	Messages() []agent.Message
 	Reset()
 	ToolNames() []string
+	// ContextInfo reports the size of the next request against the window.
+	ContextInfo() agent.ContextInfo
+	// Compact replaces older messages with a summary.
+	Compact(ctx context.Context, instructions string, automatic bool) (agent.CompactionInfo, error)
+	// Summary is the active summary, or "" when there is none.
+	Summary() string
+	// ActiveContext is what the model is sent after a compaction: the summary,
+	// the messages after it, and how many messages the summary replaces.
+	ActiveContext() (summary string, messages []agent.Message, summarized int)
 }
 
 // Options configures the TUI.
@@ -95,6 +104,7 @@ type Model struct {
 	usageIn   int
 	usageOut  int
 	turns     int
+	ctx       agent.ContextInfo
 	lastErr   error
 	status    string
 	startedAt time.Time
@@ -136,6 +146,9 @@ func New(opts Options) *Model {
 	if opts.Version == "" {
 		m.opts.Version = "dev"
 	}
+	if opts.Agent != nil {
+		m.ctx = opts.Agent.ContextInfo()
+	}
 	m.addBlock(kindSystem, "", startupText(opts))
 	return m
 }
@@ -148,7 +161,7 @@ func startupText(opts Options) string {
 		b.WriteString("\ntools: " + strings.Join(tools, ", "))
 	}
 	b.WriteString("\nenter submit · alt+enter newline · esc abort · pgup/pgdn scroll · ctrl+c quit")
-	b.WriteString("\n/help /model /new /session /switch /sessions /tools /clear /quit")
+	b.WriteString("\n/help /model /new /session /switch /sessions /tools /context /compact /clear /quit")
 	return b.String()
 }
 
@@ -460,6 +473,11 @@ func (m *Model) switchTo(id string) {
 	m.usageIn, m.usageOut = 0, 0
 	m.cur, m.curTool = -1, -1
 	m.lastErr = nil
+	// The indicator is recomputed from the restored context, marked `~` until
+	// the next response measures it.
+	if m.opts.Agent != nil {
+		m.ctx = m.opts.Agent.ContextInfo()
+	}
 	m.replayHistory()
 	m.addBlock(kindSystem, "switched session", "showing session "+shortID(id)+desc)
 }
@@ -492,6 +510,14 @@ func (m *Model) finishRun(err error) (tea.Model, tea.Cmd) {
 		next := m.queued[0]
 		m.queued = m.queued[1:]
 		m.refresh()
+		if strings.HasPrefix(next, "/") {
+			// A queued command (only /compact can be one) runs now that the
+			// turn it waited for has finished.
+			m.handleCommand(next)
+			m.layout()
+			m.refresh()
+			return m, nil
+		}
 		return m, m.startRun(next)
 	}
 	m.status = "ready"
@@ -507,10 +533,17 @@ func (m *Model) replayHistory() {
 	if m.opts.Agent == nil {
 		return
 	}
-	msgs := m.opts.Agent.Messages()
-	if len(msgs) == 0 {
+	summary, msgs, summarized := m.opts.Agent.ActiveContext()
+	if len(msgs) == 0 && summary == "" {
 		m.addBlock(kindSystem, "", "(this session has no messages yet)")
 		return
+	}
+	if summary != "" {
+		// The summarized messages are in the file but not in the model's
+		// context, so the transcript shows the summary instead of replaying
+		// them.
+		m.addBlock(kindSystem, "summary of earlier conversation",
+			fmt.Sprintf("%d earlier messages are summarized here and not replayed:\n\n%s", summarized, summary))
 	}
 	restored := 0
 	for _, msg := range msgs {
@@ -577,6 +610,14 @@ func (m *Model) handleEvent(ev agent.Event) {
 	case agent.EventRetry:
 		m.addBlock(kindSystem, "retrying",
 			fmt.Sprintf("%s — attempt %d of %d in %.1fs", ev.Error, ev.Attempt, ev.MaxAttempts, float64(ev.RetryInMS)/1000))
+	case agent.EventContext:
+		if ev.Context != nil {
+			m.ctx = *ev.Context
+		}
+	case agent.EventCompaction:
+		if ev.Compaction != nil {
+			m.addBlock(kindSystem, "context compacted", compactionSummary(*ev.Compaction))
+		}
 	}
 	m.refresh()
 }
@@ -596,6 +637,10 @@ func (m *Model) handleCommand(text string) {
 		name := strings.Join(args, " ")
 		if m.opts.Agent.SetModelName(name) {
 			m.addBlock(kindSystem, "model", "switched to "+name)
+			// The window belongs to the model, so the figure must follow it.
+			if !m.running {
+				m.ctx = m.opts.Agent.ContextInfo()
+			}
 			if m.opts.SessionInfo != nil {
 				// session model bookkeeping is the caller's business
 				_ = m.opts.SessionInfo
@@ -605,6 +650,9 @@ func (m *Model) handleCommand(text string) {
 		}
 	case "new":
 		m.opts.Agent.Reset()
+		// The indicator resets with the conversation, and no summary carries
+		// over.
+		m.ctx = m.opts.Agent.ContextInfo()
 		m.blocks = nil
 		m.turns = 0
 		m.usageIn, m.usageOut = 0, 0
@@ -620,6 +668,33 @@ func (m *Model) handleCommand(text string) {
 			}
 		}
 		m.addBlock(kindSystem, "new session", "conversation cleared "+desc)
+	case "context":
+		// The figures the console holds, not a fresh read of the agent: a run
+		// in flight is mutating it, and the event stream has kept m.ctx current.
+		if len(args) > 0 && strings.EqualFold(args[0], "summary") {
+			m.addBlock(kindSystem, "context summary", contextSummaryText(m.ctx))
+			return
+		}
+		if m.running {
+			m.addBlock(kindSystem, "context", "the run is in flight; the footer has the current figure")
+			return
+		}
+		m.ctx = m.opts.Agent.ContextInfo()
+		m.addBlock(kindSystem, "context", contextReport(m.opts.Agent.ModelName(), m.ctx))
+	case "compact":
+		if m.running {
+			// Compaction needs a stable history, so it runs after the turn
+			// rather than aborting the user's work.
+			m.queued = append(m.queued, strings.TrimSpace(text))
+			m.addBlock(kindSystem, "", "queued (compaction runs after the current turn)")
+			return
+		}
+		info, err := m.opts.Agent.Compact(context.Background(), strings.Join(args, " "), false)
+		if err != nil && info.Error == "" && info.Note == "" {
+			info.Error = err.Error()
+		}
+		m.addBlock(kindSystem, "context compacted", compactionSummary(info))
+		m.ctx = m.opts.Agent.ContextInfo()
 	case "session":
 		info := "no session (ephemeral mode)"
 		if m.opts.SessionInfo != nil {
@@ -653,6 +728,8 @@ func helpText() string {
   /switch [id]       switch to a stored session (no id opens a picker)
   /sessions          list the stored sessions for this directory
   /tools             list enabled tools
+  /context [summary] show the context window, or the active summary
+  /compact [notes]   summarize older messages to free context
   /clear             clear the transcript (ctrl+l)
   /quit              quit (ctrl+c)
 keys:
@@ -865,6 +942,11 @@ func sessionLabel(info session.Info) string {
 	}
 	body := fmt.Sprintf("%s · %d msgs · %s",
 		info.Model, info.Messages, info.UpdatedAt.Format("01-02 15:04"))
+	if info.Compacted {
+		// The active context is a summary, so the file holds more than the
+		// console will replay.
+		body += " · compacted"
+	}
 	if name == "" || name == short {
 		return fmt.Sprintf("%s  %s", short, body)
 	}
@@ -881,8 +963,14 @@ func (m Model) footer() string {
 	if m.running {
 		status = m.sp.View() + " working"
 	}
-	right := fmt.Sprintf("%s · %s · ↑%s ↓%s · %d turns",
-		model, status, humanCount(m.usageIn), humanCount(m.usageOut), m.turns)
+	if m.running && m.ctx.Compacting {
+		status = m.sp.View() + " compacting…"
+	}
+	// The context segment sits between the status and the counters, and is
+	// coloured by how full the window is.
+	ctxText := m.contextSegment()
+	right := fmt.Sprintf("%s · %s · %s · ↑%s ↓%s · %d turns",
+		model, status, ctxText, humanCount(m.usageIn), humanCount(m.usageOut), m.turns)
 	width := m.width
 	if width <= 0 {
 		width = 80
@@ -893,6 +981,142 @@ func (m Model) footer() string {
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("240")).
 		Render(left + strings.Repeat(" ", gap) + right)
+}
+
+// contextSegment renders "ctx used/limit percent", marked "~" while the figure
+// is estimated. Above the window it says how much it is over by, since a
+// percentage past 100 is less useful than the gap.
+func (m Model) contextSegment() string {
+	c := m.ctx
+	if c.Limit <= 0 && c.Used <= 0 {
+		return "ctx —"
+	}
+	tick := ""
+	if !c.Exact {
+		tick = "~"
+	}
+	tail := ""
+	if c.Limit > 0 {
+		if c.Used > c.Limit {
+			tail = fmt.Sprintf(" over by %s", humanCount(c.Used-c.Limit))
+		} else {
+			tail = fmt.Sprintf(" %d%%", c.Used*100/c.Limit)
+		}
+	}
+	text := fmt.Sprintf("ctx %s%s/%s%s", tick, humanCount(c.Used), humanCount(c.Limit), tail)
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(contextColor(c))).Render(text)
+}
+
+// contextColor maps the occupancy of the window onto the footer palette: the
+// same warning and error colours the transcript already uses.
+func contextColor(c agent.ContextInfo) string {
+	if c.Limit <= 0 {
+		return "240"
+	}
+	pct := c.Used * 100 / c.Limit
+	switch {
+	case pct >= 100:
+		return "196"
+	case c.CompactAt > 0 && pct >= c.CompactAt:
+		return "203"
+	case pct >= 70:
+		return "214"
+	default:
+		return "240"
+	}
+}
+
+// compactionSummary describes a compaction in one block of text.
+func compactionSummary(info agent.CompactionInfo) string {
+	switch {
+	case info.Error != "":
+		return "compaction failed, the context is unchanged: " + info.Error
+	case info.Messages == 0:
+		return "nothing to compact yet: the conversation is still short"
+	}
+	what := "requested"
+	if info.Automatic {
+		what = "automatic"
+	}
+	kept := info.KeptTurns
+	if kept == 0 {
+		kept = agent.DefaultKeepTurns
+	}
+	line := fmt.Sprintf("%d messages summarized · %s → %s tokens · the last %d turns kept (%s)",
+		info.Messages, humanCount(info.Before), humanCount(info.After), kept, what)
+	if info.Shortened > 0 {
+		line += fmt.Sprintf("\n%d tool results shortened to fit the window", info.Shortened)
+	}
+	if info.Note != "" {
+		line += "\n" + info.Note
+	}
+	return line
+}
+
+// contextReport renders the /context breakdown, so the footer figure is
+// explainable: which part of the context is large, and whether it is measured.
+func contextReport(model string, info agent.ContextInfo) string {
+	if model == "" {
+		model = "no model"
+	}
+	how := "estimated"
+	if info.Exact {
+		how = "measured"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  model         %s\n", model)
+	fmt.Fprintf(&b, "  window        %s (%s)\n", humanCount(info.Limit), limitSourceText(info.Source))
+	fmt.Fprintf(&b, "  used          %s tokens (%d%%, %s)\n", humanCount(info.Used), percent(info.Used, info.Limit), how)
+	fmt.Fprintf(&b, "    system        %s\n", humanCount(info.System))
+	fmt.Fprintf(&b, "    tools         %s\n", humanCount(info.Tools))
+	fmt.Fprintf(&b, "    messages      %s\n", humanCount(info.Recent+info.Summary))
+	if info.Summary > 0 {
+		fmt.Fprintf(&b, "      summary     %s (%d earlier messages)\n", humanCount(info.Summary), info.SummaryMessages)
+	}
+	fmt.Fprintf(&b, "      recent      %s (%d messages, %d turns kept)\n", humanCount(info.Recent), info.RecentMessages, info.KeepTurns)
+	headroom := info.Limit - info.Used
+	if headroom < 0 {
+		headroom = 0
+	}
+	fmt.Fprintf(&b, "  headroom      %s\n", humanCount(headroom))
+	if info.AutoCompact {
+		fmt.Fprintf(&b, "  auto-compact  on, at %d%% (%s)\n", info.CompactAt, humanCount(info.Limit*info.CompactAt/100))
+	} else {
+		fmt.Fprintf(&b, "  auto-compact  off (/compact to compact now)\n")
+	}
+	if info.LastInput > 0 || info.LastOutput > 0 {
+		fmt.Fprintf(&b, "  last request  %s input + %s output (measured)\n",
+			humanCount(info.LastInput), humanCount(info.LastOutput))
+	}
+	return b.String()
+}
+
+func contextSummaryText(info agent.ContextInfo) string {
+	if s := strings.TrimSpace(info.SummaryText); s != "" {
+		return s
+	}
+	return "(no active summary: the whole conversation is in context)"
+}
+
+func limitSourceText(source string) string {
+	switch source {
+	case agent.LimitFromConfig:
+		return "configured"
+	case agent.LimitFromProvider:
+		return "from the endpoint"
+	case agent.LimitFromTable:
+		return "from the built-in table"
+	case agent.LimitFromDefault:
+		return "assumed"
+	}
+	return source
+}
+
+func percent(used, limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	return used * 100 / limit
 }
 
 func (m Model) renderBlocks() string {
@@ -971,11 +1195,20 @@ func shortenHome(p string) string {
 	return p
 }
 
+// humanCount abbreviates a token count for the footer: whole thousands and
+// millions lose their decimal ("128k", not "128.0k"), and a fractional value
+// keeps one digit.
 func humanCount(n int) string {
 	switch {
 	case n >= 1_000_000:
+		if n%1_000_000 == 0 {
+			return fmt.Sprintf("%dM", n/1_000_000)
+		}
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 	case n >= 1_000:
+		if n%1_000 == 0 {
+			return fmt.Sprintf("%dk", n/1_000)
+		}
 		return fmt.Sprintf("%.1fk", float64(n)/1_000)
 	default:
 		return fmt.Sprintf("%d", n)

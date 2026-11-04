@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -94,6 +95,16 @@ type File struct {
 	// MaxRetries is how many times a transient provider failure is retried
 	// (0 = built-in default, negative disables retrying).
 	MaxRetries int `toml:"max_retries" json:"max_retries"`
+	// ContextWindow overrides the model's context window in tokens. 0 resolves
+	// it from the endpoint, a built-in table, or a conservative default. A "k"
+	// or "m" suffix is accepted, so 128k and 128000 are the same.
+	ContextWindow Size `toml:"context_window" json:"context_window"`
+	// AutoCompact compacts older messages when the context window fills.
+	// Unset means on.
+	AutoCompact *bool `toml:"auto_compact" json:"auto_compact"`
+	// CompactAt is the percentage of the window at which automatic compaction
+	// runs (0 = built-in default).
+	CompactAt int `toml:"compact_at" json:"compact_at"`
 	// SystemPrompt replaces the default system prompt; a value that names an
 	// existing file is read from disk.
 	SystemPrompt string `toml:"system_prompt" json:"system_prompt"`
@@ -110,6 +121,60 @@ type File struct {
 	// Pointers so "unset" is distinguishable from false.
 	NoSession      *bool `toml:"no_session" json:"no_session"`
 	NoContextFiles *bool `toml:"no_context_files" json:"no_context_files"`
+}
+
+// Size is a token count that may be written with a k/m suffix ("128k", "1m"),
+// because that is how model context windows are usually quoted. It is an int,
+// so a bare number works too.
+type Size int
+
+// UnmarshalText implements encoding.TextUnmarshaler, which is how the TOML
+// decoder reads a quoted value into it.
+func (s *Size) UnmarshalText(b []byte) error {
+	n, err := ParseSize(string(b))
+	if err != nil {
+		return err
+	}
+	*s = Size(n)
+	return nil
+}
+
+// UnmarshalJSON accepts both 128000 and "128k".
+func (s *Size) UnmarshalJSON(b []byte) error {
+	text := strings.TrimSpace(string(b))
+	if text == "null" || text == "" {
+		return nil
+	}
+	text = strings.Trim(text, `"`)
+	n, err := ParseSize(text)
+	if err != nil {
+		return err
+	}
+	*s = Size(n)
+	return nil
+}
+
+// ParseSize reads a token count, with an optional k/m suffix (case-insensitive).
+func ParseSize(v string) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	mult := 1
+	switch last := v[len(v)-1]; last {
+	case 'k', 'K':
+		mult, v = 1000, v[:len(v)-1]
+	case 'm', 'M':
+		mult, v = 1000000, v[:len(v)-1]
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return 0, fmt.Errorf("invalid token count %q: want a number, optionally with a k or m suffix", v)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("invalid token count %d: must not be negative", n)
+	}
+	return n * mult, nil
 }
 
 // Loaded is a parsed configuration file plus its provenance.

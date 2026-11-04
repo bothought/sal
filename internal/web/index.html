@@ -126,6 +126,8 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #1a1020; font-weight: 600; }
   button.primary:hover { filter: brightness(1.08); }
   button:disabled { opacity: .5; cursor: default; }
+  #usage[data-ctx-class="ctx-warning"] { color: var(--tool); }
+  #usage[data-ctx-class="ctx-critical"], #usage[data-ctx-class="ctx-over"] { color: var(--error); }
   .hint { max-width: 60rem; margin: .45rem auto 0; color: var(--muted); font-size: .78rem; }
   .hint code { color: var(--text); }
 </style>
@@ -146,7 +148,7 @@
     <button class="primary" id="send">Send</button>
     <button id="abort">Abort</button>
   </div>
-  <div class="hint"><code>esc</code> aborts &middot; <code>/help /model /new /session /tools /clear</code></div>
+  <div class="hint"><code>esc</code> aborts &middot; <code>/help /model /new /session /tools /context /compact /clear</code></div>
 </div>
 
 <footer>
@@ -177,6 +179,9 @@
   var pickerEl = document.getElementById("sessionPicker");
 
   var state = { running: false, model: "", provider: "", status: "", usageIn: 0, usageOut: 0,
+                ctxUsed: 0, ctxLimit: 0, ctxExact: false, ctxCompactAt: 0,
+                ctxAutoCompact: false, ctxCompacting: false,
+                ctxSummary: "", ctxLastInput: 0, ctxLastOutput: 0,
                 turns: 0, session: "", sessionId: "", cwd: "", version: "", tools: [],
                 sessions: [], sessionsKnown: false };
   var blocks = [];
@@ -271,12 +276,77 @@
     sessionEl.textContent = state.session || "no session (ephemeral mode)";
     var model = state.model || "no model";
     var status = state.running ? "working" : (state.status || "ready");
-    usageEl.textContent = model + " · " + status +
+    if (state.running && state.ctxCompacting) status = "compacting…";
+    usageEl.textContent = model + " · " + status + " · " + contextSegment() +
       " · ↑" + human(state.usageIn) + " ↓" + human(state.usageOut) +
       " · " + state.turns + " turns";
     usageEl.className = "right" + (state.running ? " status-working" : "");
     sendBtn.disabled = false;
     abortBtn.disabled = !state.running;
+  }
+
+  // contextSegment renders "ctx used/limit percent", marked "~" while the
+  // figure is an estimate, and classified by how full the window is. The
+  // severity colour is applied to the footer through its data attribute, so
+  // the page needs no extra element.
+  function contextSegment() {
+    if (!state.ctxLimit && !state.ctxUsed) return "ctx —";
+    var tick = state.ctxExact ? "" : "~";
+    var pct = state.ctxLimit ? Math.floor(state.ctxUsed * 100 / state.ctxLimit) : 0;
+    var cls = "ctx-normal";
+    if (pct >= 100) cls = "ctx-over";
+    else if (state.ctxCompactAt && pct >= state.ctxCompactAt) cls = "ctx-critical";
+    else if (pct >= 70) cls = "ctx-warning";
+    usageEl.dataset.ctxClass = cls;
+    var tail = "";
+    if (state.ctxLimit && state.ctxUsed > state.ctxLimit) {
+      tail = " over by " + human(state.ctxUsed - state.ctxLimit);
+    } else if (state.ctxLimit) {
+      tail = " " + pct + "%";
+    }
+    return "ctx " + tick + human(state.ctxUsed) + "/" + human(state.ctxLimit) + tail;
+  }
+
+  // contextReport explains the footer figure: which part of the context is
+  // large, and whether the number is measured or estimated.
+  function contextReport() {
+    var pct = state.ctxLimit ? Math.floor(state.ctxUsed * 100 / state.ctxLimit) : 0;
+    var lines = [
+      "  model         " + (state.model || "no model"),
+      "  window        " + human(state.ctxLimit) + " (" + limitSource(state.ctxSource) + ")",
+      "  used          " + human(state.ctxUsed) + " tokens (" + pct + "%, " +
+        (state.ctxExact ? "measured" : "estimated") + ")",
+      "    system        " + human(state.ctxSystem),
+      "    tools         " + human(state.ctxTools),
+      "    messages      " + human(state.ctxRecent + state.ctxSummaryTokens) +
+        (state.ctxSummaryTokens
+          ? "\n      summary     " + human(state.ctxSummaryTokens) +
+            " (" + state.ctxSummaryMessages + " earlier messages)"
+          : "") +
+        "\n      recent      " + human(state.ctxRecent) +
+        " (" + state.ctxRecentMessages + " messages, " + state.ctxKeepTurns + " turns kept)",
+      "  headroom      " + human(Math.max(0, state.ctxLimit - state.ctxUsed)),
+      "  auto-compact  " + (state.ctxAutoCompact
+        ? "on, at " + state.ctxCompactAt + "% (" + human(Math.floor(state.ctxLimit * state.ctxCompactAt / 100)) + ")"
+        : "off (/compact to compact now)")
+    ];
+    if (state.ctxLastInput || state.ctxLastOutput) {
+      lines.push("  last request  " + human(state.ctxLastInput) + " input + " +
+                 human(state.ctxLastOutput) + " output (measured)");
+    }
+    return lines.join("\n");
+  }
+
+  // limitSource names where the window came from, so an assumed figure is not
+  // mistaken for a known one.
+  function limitSource(src) {
+    switch (src) {
+      case "config": return "configured";
+      case "provider": return "from the endpoint";
+      case "table": return "from the built-in table";
+      case "default": return "assumed";
+    }
+    return src || "resolved";
   }
 
   // renderPicker fills the header menu with the switchable sessions, so a
@@ -313,12 +383,14 @@
     var when = s.updatedAt ? new Date(s.updatedAt) : null;
     var stamp = when && !isNaN(when) ? " · " + when.toLocaleString() : "";
     var name = s.name ? " · " + s.name : "";
-    return short(s.id) + name + " · " + (s.messages || 0) + " msgs" + stamp;
+    var compacted = s.compacted ? " · compacted" : "";
+    return short(s.id) + name + " · " + (s.messages || 0) + " msgs" + compacted + stamp;
   }
 
+  // human abbreviates a count: whole thousands and millions lose the decimal.
   function human(n) {
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    if (n >= 1e6) return (n % 1e6 === 0 ? (n / 1e6) + "M" : (n / 1e6).toFixed(1) + "M");
+    if (n >= 1e3) return (n % 1e3 === 0 ? (n / 1e3) + "k" : (n / 1e3).toFixed(1) + "k");
     return String(n);
   }
 
@@ -355,6 +427,11 @@
         break;
       case "error":
         appendBlock({ kind: "error", title: ev.title || "error", body: ev.text || "", isError: true, done: true });
+        break;
+      case "compaction":
+        appendBlock({ kind: "system", title: ev.title || "context compacted", body: ev.text || "", done: true });
+        applyState(ev);
+        updateFooter();
         break;
       case "tool":
         openAssistant = -1;
@@ -413,6 +490,23 @@
     state.status = ev.status || "";
     state.usageIn = ev.usageIn || 0;
     state.usageOut = ev.usageOut || 0;
+    state.ctxUsed = ev.ctxUsed || 0;
+    state.ctxLimit = ev.ctxLimit || 0;
+    state.ctxExact = !!ev.ctxExact;
+    state.ctxSource = ev.ctxSource || "";
+    state.ctxCompactAt = ev.ctxCompactAt || 0;
+    state.ctxAutoCompact = !!ev.ctxAutoCompact;
+    state.ctxCompacting = !!ev.ctxCompacting;
+    state.ctxSummary = ev.ctxSummary || "";
+    state.ctxLastInput = ev.ctxLastInput || 0;
+    state.ctxLastOutput = ev.ctxLastOutput || 0;
+    state.ctxSystem = ev.ctxSystem || 0;
+    state.ctxTools = ev.ctxTools || 0;
+    state.ctxSummaryTokens = ev.ctxSummaryTokens || 0;
+    state.ctxSummaryMessages = ev.ctxSummaryMessages || 0;
+    state.ctxRecent = ev.ctxRecent || 0;
+    state.ctxRecentMessages = ev.ctxRecentMessages || 0;
+    state.ctxKeepTurns = ev.ctxKeepTurns || 0;
     state.turns = ev.turns || 0;
     state.session = ev.session || "";
     state.sessionId = ev.sessionId || "";
@@ -473,7 +567,10 @@
           body: "commands:\n  /help              show this help\n  /model [name]      show or switch the model\n" +
                 "  /new               start a new session\n  /session           show the current session\n" +
                 "  /switch [id]       switch to a stored session\n  /sessions          list the stored sessions\n" +
-                "  /tools             list enabled tools\n  /clear             clear the transcript\n\n" +
+                "  /tools             list enabled tools\n" +
+                "  /context [summary] show the context window, or the active summary\n" +
+                "  /compact [notes]   summarize older messages to free context\n" +
+                "  /clear             clear the transcript\n\n" +
                 "keys:\n  enter              send (queues while the agent is working)\n  shift+enter        newline\n  esc                abort the current run",
           done: true });
         break;
@@ -505,6 +602,23 @@
         break;
       case "tools":
         appendBlock({ kind: "system", title: "tools", body: (state.tools || []).join(", ") || "(none)", done: true });
+        break;
+      case "context":
+        if (arg.split(/\s+/)[0].toLowerCase() === "summary") {
+          appendBlock({ kind: "system", title: "context summary",
+            body: state.ctxSummary || "(no active summary: the whole conversation is in context)", done: true });
+          break;
+        }
+        appendBlock({ kind: "system", title: "context", body: contextReport(), done: true });
+        break;
+      case "compact":
+        api("/api/compact", { instructions: arg }).then(function (res) {
+          if (res && res.queued) {
+            appendBlock({ kind: "system", title: "queued", body: "compaction runs after the current turn", done: true });
+          }
+        }).catch(function (err) {
+          appendBlock({ kind: "error", title: "compact", body: err.message, isError: true, done: true });
+        });
         break;
       case "clear":
         api("/api/clear").catch(function () {});
@@ -538,7 +652,8 @@
     }
     var lines = state.sessions.map(function (s) {
       return "  " + short(s.id) + "  " + (s.messages || 0) + " msgs · " + (s.model || "no model") +
-             (s.name ? " · " + s.name : "") + (s.current ? "  (current)" : "");
+             (s.name ? " · " + s.name : "") + (s.compacted ? " · compacted" : "") +
+             (s.current ? "  (current)" : "");
     });
     appendBlock({ kind: "system", title: "sessions",
       body: lines.join("\n") + "\n\nswitch with /switch <id> or the menu at the top right", done: true });
