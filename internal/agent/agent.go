@@ -1,4 +1,4 @@
-// Package agent implements hal's core agent loop: it turns a user prompt into
+// Package agent implements sal's core agent loop: it turns a user prompt into
 // one or more provider requests, executes the tool calls the model asks for,
 // and appends every message to the conversation history.
 //
@@ -426,7 +426,7 @@ func (a *Agent) RunPrompt(ctx context.Context, prompt string, emit func(Event)) 
 	a.resolveLimit(ctx)
 	a.emitContext(emit)
 	if a.Provider == nil {
-		err := fmt.Errorf("no model provider configured: set HAL_API_KEY or OPENAI_API_KEY")
+		err := fmt.Errorf("no model provider configured: set SAL_API_KEY or OPENAI_API_KEY")
 		emit(Event{Type: EventError, Error: err.Error()})
 		return err
 	}
@@ -673,7 +673,7 @@ func truncate(s string, max int) string {
 // context files / extra instructions.
 func BuildSystemPrompt(cwd string, extra string) string {
 	var b strings.Builder
-	b.WriteString(`You are hal, a minimal coding agent that works in the user's terminal.
+	b.WriteString(`You are sal, a minimal coding agent that works in the user's terminal.
 
 You help with programming, research, writing, and file work by inspecting the
 working directory, running commands, and editing files. You work autonomously:

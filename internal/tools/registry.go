@@ -1,4 +1,4 @@
-// Package tools implements hal's built-in tools: read, bash, edit, write, grep,
+// Package tools implements sal's built-in tools: read, bash, edit, write, grep,
 // find and ls. A Windows-only powershell tool is not included.
 package tools
 
@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Rushera/hal/internal/agent"
+	"github.com/bothought/sal/internal/agent"
 )
 
-// BuiltinNames lists the tools hal knows about.
+// BuiltinNames lists the tools sal knows about.
 var BuiltinNames = []string{"read", "bash", "edit", "write", "grep", "find", "ls"}
 
 // DefaultNames is the default enabled set: read/bash/edit/write plus the

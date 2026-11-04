@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/config"
-	"github.com/Rushera/hal/internal/session"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/config"
+	"github.com/bothought/sal/internal/session"
 )
 
 // isolateXDG points every XDG variable at a temp directory so tests never read
@@ -25,7 +25,7 @@ func isolateXDG(t *testing.T) (home, cfgHome, dataHome string) {
 	t.Setenv("XDG_CONFIG_HOME", cfgHome)
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
-	for _, k := range []string{"HAL_CONFIG", "HAL_SESSION_DIR", "HAL_MODEL", "HAL_BASE_URL", "HAL_API_KEY", "OPENAI_MODEL", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENCODE_GO_API_KEY", "NAMED_KEY"} {
+	for _, k := range []string{"SAL_CONFIG", "SAL_SESSION_DIR", "SAL_MODEL", "SAL_BASE_URL", "SAL_API_KEY", "OPENAI_MODEL", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENCODE_GO_API_KEY", "NAMED_KEY"} {
 		os.Unsetenv(k)
 		t.Setenv(k, "")
 	}
@@ -34,7 +34,7 @@ func isolateXDG(t *testing.T) (home, cfgHome, dataHome string) {
 
 func writeConfig(t *testing.T, cfgHome, name, content string) string {
 	t.Helper()
-	dir := filepath.Join(cfgHome, "hal")
+	dir := filepath.Join(cfgHome, "sal")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ base_url = "http://config.example/v1"
 tools = "read,grep"
 max_turns = 9
 `)
-	t.Setenv("HAL_MODEL", "from-env")
+	t.Setenv("SAL_MODEL", "from-env")
 
 	opts, set, err := parseArgs([]string{"--model", "from-flag"})
 	if err != nil {
@@ -115,7 +115,7 @@ max_turns = 9
 func TestEnvBeatsConfigWhenNoFlag(t *testing.T) {
 	_, cfgHome, _ := isolateXDG(t)
 	writeConfig(t, cfgHome, "config.toml", `model = "from-config"`)
-	t.Setenv("HAL_MODEL", "from-env")
+	t.Setenv("SAL_MODEL", "from-env")
 
 	opts, set, err := parseArgs(nil)
 	if err != nil {
@@ -128,7 +128,7 @@ func TestEnvBeatsConfigWhenNoFlag(t *testing.T) {
 		t.Fatalf("env should beat config: model = %q", resolved.model)
 	}
 	for _, s := range sources {
-		if s.Key == "model" && s.Source != "env $HAL_MODEL" {
+		if s.Key == "model" && s.Source != "env $SAL_MODEL" {
 			t.Fatalf("model source = %q", s.Source)
 		}
 	}
@@ -206,7 +206,7 @@ tools = "write,read"
 		t.Fatalf("configured model not used: %v", mock.requests[0]["model"])
 	}
 	// no session directory should have been created thanks to no_session
-	if entries, err := os.ReadDir(filepath.Join(dataHome, "hal")); err == nil && len(entries) > 0 {
+	if entries, err := os.ReadDir(filepath.Join(dataHome, "sal")); err == nil && len(entries) > 0 {
 		var names []string
 		for _, e := range entries {
 			names = append(names, e.Name())
@@ -221,7 +221,7 @@ func TestShowConfigReportsPathsSourcesAndMasksSecrets(t *testing.T) {
 model = "shown-model"
 api_key = "sk-supersecretvalue"
 `)
-	t.Setenv("HAL_MODEL", "env-model")
+	t.Setenv("SAL_MODEL", "env-model")
 
 	out, err := captureStdout(t, func() error {
 		return runWithArgs([]string{"--show-config"})
@@ -230,14 +230,14 @@ api_key = "sk-supersecretvalue"
 		t.Fatalf("--show-config failed: %v", err)
 	}
 
-	if !strings.Contains(out, filepath.Join(cfgHome, "hal", "config.toml")) {
+	if !strings.Contains(out, filepath.Join(cfgHome, "sal", "config.toml")) {
 		t.Fatalf("config path missing:\n%s", out)
 	}
-	if !strings.Contains(out, "env-model") || !strings.Contains(out, "env $HAL_MODEL") {
+	if !strings.Contains(out, "env-model") || !strings.Contains(out, "env $SAL_MODEL") {
 		t.Fatalf("resolved model and its source missing:\n%s", out)
 	}
-	if !strings.Contains(out, filepath.Join(cfgHome, "hal", "sessions")) &&
-		!strings.Contains(out, filepath.Join(cfgHome, "data", "hal")) {
+	if !strings.Contains(out, filepath.Join(cfgHome, "sal", "sessions")) &&
+		!strings.Contains(out, filepath.Join(cfgHome, "data", "sal")) {
 		// session dir comes from XDG_DATA_HOME
 		if !strings.Contains(out, "session dir") {
 			t.Fatalf("session dir missing:\n%s", out)
@@ -274,7 +274,7 @@ api_key = "k"
 		t.Fatalf("run failed: %v", err)
 	}
 
-	root := filepath.Join(dataHome, "hal", "sessions")
+	root := filepath.Join(dataHome, "sal", "sessions")
 	if _, err := os.Stat(root); err != nil {
 		t.Fatalf("sessions should live under $XDG_DATA_HOME: %v", err)
 	}
@@ -287,7 +287,7 @@ api_key = "k"
 	if len(files) != 1 || !strings.HasSuffix(files[0].Name(), ".jsonl") {
 		t.Fatalf("expected one session file in %s, got %v", bucket, files)
 	}
-	if _, err := os.Stat(filepath.Join(workdir, ".hal")); err == nil {
+	if _, err := os.Stat(filepath.Join(workdir, ".sal")); err == nil {
 		t.Fatal("nothing should be written outside the XDG directories")
 	}
 }
@@ -353,7 +353,7 @@ func TestListSessionsShowsTheConversationsForTheDirectory(t *testing.T) {
 	if strings.Contains(out, elsewhere.ID[:8]) {
 		t.Fatalf("another directory's session must not be listed:\n%s", out)
 	}
-	if !strings.Contains(out, "hal --session") {
+	if !strings.Contains(out, "sal --session") {
 		t.Fatalf("the listing should say how to resume:\n%s", out)
 	}
 }

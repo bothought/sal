@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rushera/hal/internal/agent"
+	"github.com/bothought/sal/internal/agent"
 )
 
 func TestSessionRoundTrip(t *testing.T) {
@@ -137,13 +137,13 @@ func isolate(t *testing.T) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-	t.Setenv("HAL_SESSION_DIR", "")
+	t.Setenv("SAL_SESSION_DIR", "")
 	return home
 }
 
 func TestRootWithDefaultsToXDGDataDirectory(t *testing.T) {
 	home := isolate(t)
-	want := filepath.Join(home, "data", "hal", "sessions")
+	want := filepath.Join(home, "data", "sal", "sessions")
 	if got := RootWith(""); got != want {
 		t.Fatalf("RootWith(\"\") = %s, want %s", got, want)
 	}
@@ -151,9 +151,9 @@ func TestRootWithDefaultsToXDGDataDirectory(t *testing.T) {
 		t.Fatalf("an explicit directory must win: %s", RootWith(explicit))
 	}
 	fromEnv := filepath.Join(t.TempDir(), "from-env")
-	t.Setenv("HAL_SESSION_DIR", fromEnv)
+	t.Setenv("SAL_SESSION_DIR", fromEnv)
 	if got := RootWith(""); got != fromEnv {
-		t.Fatalf("HAL_SESSION_DIR must win over XDG: %s", got)
+		t.Fatalf("SAL_SESSION_DIR must win over XDG: %s", got)
 	}
 }
 
@@ -163,7 +163,7 @@ func TestSearchRootsIsTheResolvedRoot(t *testing.T) {
 	if len(roots) != 1 {
 		t.Fatalf("expected exactly one root, got %v", roots)
 	}
-	if want := filepath.Join(home, "data", "hal", "sessions"); roots[0] != want {
+	if want := filepath.Join(home, "data", "sal", "sessions"); roots[0] != want {
 		t.Fatalf("root = %s, want %s", roots[0], want)
 	}
 }
@@ -171,7 +171,7 @@ func TestSearchRootsIsTheResolvedRoot(t *testing.T) {
 func TestLatestInFindsNewestAcrossRoots(t *testing.T) {
 	home := isolate(t)
 	cwd := t.TempDir()
-	primary := filepath.Join(home, "data", "hal", "sessions")
+	primary := filepath.Join(home, "data", "sal", "sessions")
 	secondary := filepath.Join(home, "other-root")
 
 	if _, err := LatestIn([]string{primary, secondary}, cwd, false); err == nil {

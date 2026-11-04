@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/session"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/session"
 )
 
 // fakeAgent is a scripted stand-in for *agent.Agent.
@@ -241,7 +241,7 @@ func post(t *testing.T, base, token, path, body string) *http.Response {
 		t.Fatalf("building request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Hal-Token", token)
+	req.Header.Set("X-Sal-Token", token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
@@ -507,7 +507,7 @@ func TestIndexServesTheConsoleWithToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "<title>hal</title>") {
+	if !strings.Contains(string(body), "<title>sal</title>") {
 		t.Fatalf("index is not the console page:\n%s", body)
 	}
 }

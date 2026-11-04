@@ -1,5 +1,5 @@
 // Package session persists conversations as JSONL, one entry per line with
-// parent links. hal keeps the tree but only uses the linear active branch.
+// parent links. sal keeps the tree but only uses the linear active branch.
 package session
 
 import (
@@ -16,18 +16,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/config"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/config"
 )
 
 // RootWith returns the canonical session storage root: an explicit directory
-// (--session-dir or the config file), then $HAL_SESSION_DIR, then the XDG
+// (--session-dir or the config file), then $SAL_SESSION_DIR, then the XDG
 // data directory. New sessions are always written here.
 func RootWith(dir string) string {
 	if strings.TrimSpace(dir) != "" {
 		return config.ExpandPath(dir)
 	}
-	if v := strings.TrimSpace(os.Getenv("HAL_SESSION_DIR")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("SAL_SESSION_DIR")); v != "" {
 		return config.ExpandPath(v)
 	}
 	return config.Resolve().SessionDir

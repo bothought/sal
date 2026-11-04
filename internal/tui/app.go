@@ -1,4 +1,4 @@
-// Package tui implements hal's interactive terminal interface with bubbletea:
+// Package tui implements sal's interactive terminal interface with bubbletea:
 // a header, a scrollable transcript of messages and tool calls, a multi-line
 // editor, and a footer showing directory, model, session and token usage.
 package tui
@@ -17,8 +17,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/session"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/session"
 )
 
 // Agent is the slice of *agent.Agent the TUI drives. Keeping it an interface
@@ -121,7 +121,7 @@ type runDoneMsg struct{ err error }
 // New builds the TUI model.
 func New(opts Options) *Model {
 	ta := textarea.New()
-	ta.Placeholder = "Ask hal to do something…  (/help for commands, esc aborts)"
+	ta.Placeholder = "Ask sal to do something…  (/help for commands, esc aborts)"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(3)
@@ -175,9 +175,9 @@ func headerLine(opts Options) string {
 		provider = opts.Agent.ProviderName()
 	}
 	if provider != "" {
-		return fmt.Sprintf("hal %s — %s (%s)", opts.Version, model, provider)
+		return fmt.Sprintf("sal %s — %s (%s)", opts.Version, model, provider)
 	}
-	return fmt.Sprintf("hal %s — %s", opts.Version, model)
+	return fmt.Sprintf("sal %s — %s", opts.Version, model)
 }
 
 // Init implements tea.Model. An initial prompt supplied on the command line
@@ -844,11 +844,11 @@ func (m *Model) refresh() {
 // View implements tea.Model.
 func (m *Model) View() string {
 	if !m.ready {
-		return "starting hal…"
+		return "starting sal…"
 	}
 	var b strings.Builder
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render(
-		fmt.Sprintf("hal %s", m.opts.Version)))
+		fmt.Sprintf("sal %s", m.opts.Version)))
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(
 		"  " + shortenHome(m.opts.Cwd)))
 	b.WriteString("\n")

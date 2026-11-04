@@ -19,10 +19,10 @@ Never paste API keys, session transcripts, or file contents you would not share.
 
 **Version and platform**
 
-- `hal --version`:
+- `sal --version`:
 - OS and architecture:
 - How it was built (`go install`, `go build`, release binary):
 
 **Relevant configuration**
 
-<!-- Redact credentials. Include the output of `hal --show-config` if useful. -->
+<!-- Redact credentials. Include the output of `sal --show-config` if useful. -->

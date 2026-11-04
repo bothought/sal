@@ -1,6 +1,6 @@
 # Build output
-/hal
-/hal.exe
+/sal
+/sal.exe
 /dist/
 *.test
 *.out

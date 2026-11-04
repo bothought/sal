@@ -4,7 +4,7 @@ Notes for AI coding agents (and for people) working in this repository.
 
 ## What this project is
 
-hal is a minimal coding agent written in Go, driven from the terminal. It is an
+sal is a minimal coding agent written in Go, driven from the terminal. It is an
 agent loop over an LLM with a small set of built-in file/shell tools, a
 [bubbletea](https://github.com/charmbracelet/bubbletea) terminal UI, a browser
 console, JSONL sessions, and an OpenAI-compatible provider.
@@ -36,7 +36,7 @@ depend on `internal/agent` (for the shared message/event/tool types) and
 ## Build and test
 
 ```bash
-go build ./...         # or: go build -o hal .
+go build ./...         # or: go build -o sal .
 go vet ./...
 go test ./...
 go test -race ./...    # Linux/macOS
@@ -58,15 +58,15 @@ identifiers, errors that name what failed. One logical change per commit.
 ## Design documents
 
 `design/` holds the project's design documentation. It is the specification the
-code is written against, and it is split so that "what hal does" and "how hal is
+code is written against, and it is split so that "what sal does" and "how sal is
 built" never mix:
 
 ```
 design/README.md          index of the design docs and the folder conventions
-design/features/          what hal does — one folder per feature item
+design/features/          what sal does — one folder per feature item
   basic-functions/        the current feature set, described coarse to fine
   context-management/     the context indicator and compaction
-design/technical/         how hal is built — one folder per technical item
+design/technical/         how sal is built — one folder per technical item
   architecture/           the current technical architecture
   context-compaction/     how context-management is built
 ```
@@ -124,8 +124,8 @@ no further approval step of its own.
   Merging is the review: a document on `main` is a document to implement, and the
   code implementing it needs no further approval step of its own.
 
-Because hal itself loads `AGENTS.md` (and `CLAUDE.md`) as context files, this
-file is also the instruction set an agent run by hal reads from its own working
+Because sal itself loads `AGENTS.md` (and `CLAUDE.md`) as context files, this
+file is also the instruction set an agent run by sal reads from its own working
 directory.
 
 ## Where to look first

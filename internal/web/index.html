@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>hal</title>
+<title>sal</title>
 <style>
   :root {
     --bg: #14151a;
@@ -134,7 +134,7 @@
 </head>
 <body>
 <header>
-  <span class="name" id="title">hal</span>
+  <span class="name" id="title">sal</span>
   <span class="cwd" id="cwd"></span>
   <span class="spacer"></span>
   <select id="sessionPicker" title="switch session" disabled></select>
@@ -144,7 +144,7 @@
 
 <div class="composer">
   <div class="row">
-    <textarea id="input" rows="2" placeholder="Ask hal to do something…  (Enter to send, Shift+Enter for a newline; /help for commands)"></textarea>
+    <textarea id="input" rows="2" placeholder="Ask sal to do something…  (Enter to send, Shift+Enter for a newline; /help for commands)"></textarea>
     <button class="primary" id="send">Send</button>
     <button id="abort">Abort</button>
   </div>
@@ -191,7 +191,7 @@
   function api(path, body) {
     return fetch(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Hal-Token": token },
+      headers: { "Content-Type": "application/json", "X-Sal-Token": token },
       body: JSON.stringify(body || {})
     }).then(function (resp) {
       return resp.json().catch(function () { return {}; }).then(function (data) {
@@ -271,7 +271,7 @@
   }
 
   function updateFooter() {
-    titleEl.textContent = "hal " + (state.version || "");
+    titleEl.textContent = "sal " + (state.version || "");
     cwdEl.textContent = state.cwd || "";
     sessionEl.textContent = state.session || "no session (ephemeral mode)";
     var model = state.model || "no model";

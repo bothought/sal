@@ -1,6 +1,6 @@
 # Basic functions
 
-This document is the feature specification of hal: what the program does, from
+This document is the feature specification of sal: what the program does, from
 the outside in. It is written coarse to fine — the overview first, then each
 area, then the detail that matters to a user or to whoever tests the behaviour.
 It says nothing about how any of it is implemented; that is
@@ -8,16 +8,16 @@ It says nothing about how any of it is implemented; that is
 
 ## 1. Overview
 
-hal is a minimal coding agent for the terminal. It takes a request in natural
+sal is a minimal coding agent for the terminal. It takes a request in natural
 language, asks an LLM what to do, runs the file and shell tools the model asks
 for, feeds the results back, and repeats until the model answers without asking
 for another tool.
 
-Everything hal does is one of four things:
+Everything sal does is one of four things:
 
 1. **The agent loop** — the turn-by-turn cycle described above.
 2. **Seven built-in tools** — `read`, `bash`, `edit`, `write`, `grep`, `find`,
-   `ls`, which are the only way hal touches the machine.
+   `ls`, which are the only way sal touches the machine.
 3. **Four interfaces** — the interactive terminal UI, the browser console
    (`--web`), one-shot print mode (`--print`), and a machine-readable JSON event
    stream (`--mode json`). All four drive the same agent loop with the same
@@ -132,7 +132,7 @@ Guardrails, all user-visible:
   was dropped), runs with a timeout (default 120s, capped at 600s) and, on
   timeout, kills the whole process group so a shell's children die with it. The
   reported status is the exit code, or that the command timed out and was
-  killed. The child runs in the working directory (or `workdir`) with `HAL=1` in
+  killed. The child runs in the working directory (or `workdir`) with `SAL=1` in
   its environment.
 - `edit` fails when `oldText` is absent, and when it matches more than once
   without `replaceAll`, telling the model to add context or read the file again.
@@ -153,7 +153,7 @@ Guardrails, all user-visible:
 
 The default mode when both stdin and stdout are a terminal. Its screen is:
 
-- a **header** line: `hal <version> — <model> (<provider>)` and the working
+- a **header** line: `sal <version> — <model> (<provider>)` and the working
   directory, shortened with `~`;
 - a scrollable **transcript** of blocks: user turns (`›`), assistant answers,
   tool calls (`⚙ name(summary)` with output and duration, or `(running…)` while
@@ -194,9 +194,9 @@ build step and no external assets (it is served from the binary):
   query parameter), which is what stops a page on another origin from reaching
   the API through the browser's loopback access — the console can run shell
   commands.
-- The token is persisted in `$XDG_STATE_HOME/hal/web-token` (mode `0600`) and
+- The token is persisted in `$XDG_STATE_HOME/sal/web-token` (mode `0600`) and
   reused, so a page that is already open keeps working after the process is
-  restarted: reload it and it reconnects. `--web-token` / `$HAL_WEB_TOKEN`
+  restarted: reload it and it reconnects. `--web-token` / `$SAL_WEB_TOKEN`
   override it with a fixed value (a development convenience).
 - The page has a header (title, working directory, session menu), a transcript
   with the same block kinds as the terminal UI, a composer (`Send`, `Abort`,
@@ -232,7 +232,7 @@ error. `--mode text` selects the interactive text UI when stdout is a terminal
 ### 4.5 Piped input and `@file`
 
 Non-terminal stdin is read (up to 4 MiB) and prepended to the prompt, so
-`cat main.go | hal -p "review this"` works. Positional arguments starting with
+`cat main.go | sal -p "review this"` works. Positional arguments starting with
 `@` name files, whose contents are embedded as `<file path="...">…</file>`
 blocks (each capped at 512 KiB) ahead of the written prompt. Message words are
 joined into one prompt.
@@ -242,8 +242,8 @@ joined into one prompt.
 ### 5.1 Storage and grouping
 
 Conversations are stored as JSONL files, one JSON object per line, under
-`$XDG_DATA_HOME/hal/sessions/<slugified-cwd>/<timestamp>-<id8>.jsonl`
-(`--session-dir`, `session_dir`, `$HAL_SESSION_DIR` override the root). Each
+`$XDG_DATA_HOME/sal/sessions/<slugified-cwd>/<timestamp>-<id8>.jsonl`
+(`--session-dir`, `session_dir`, `$SAL_SESSION_DIR` override the root). Each
 file starts with a session header (id, working directory, model, name) and then
 records every message as the run appends it, so persistence is append-only and a
 process killed mid-run leaves a readable file. `--no-session` disables storage
@@ -258,10 +258,10 @@ says so in the switcher, since its active context is shorter than its file.
 
 | Command | Effect |
 |---|---|
-| `hal -c`, `hal --continue` | Resume the most recent session for this directory; if there is none, start a fresh one (so `hal --web -c` works on a first run). |
-| `hal --continue-all` | Same, but across every session recorded on the machine. |
-| `hal --session <file>` | Open a specific session file by path. |
-| `hal --list-sessions` | Print the stored conversations for this directory, newest first, with their ids, name, model, message count and time, and the resume command. |
+| `sal -c`, `sal --continue` | Resume the most recent session for this directory; if there is none, start a fresh one (so `sal --web -c` works on a first run). |
+| `sal --continue-all` | Same, but across every session recorded on the machine. |
+| `sal --session <file>` | Open a specific session file by path. |
+| `sal --list-sessions` | Print the stored conversations for this directory, newest first, with their ids, name, model, message count and time, and the resume command. |
 
 ### 5.3 Switching inside a running console
 
@@ -306,13 +306,13 @@ explains that closing the tab is how to stop it):
 
 Every setting resolves with the precedence **flag > environment > config file >
 default**, and `--show-config` prints the resolved value and its source for each
-one (credentials masked). `hal --version` prints the version.
+one (credentials masked). `sal --version` prints the version.
 
 ### 6.3 Config file
 
-TOML at `$XDG_CONFIG_HOME/hal/config.toml`, with JSON also accepted as
+TOML at `$XDG_CONFIG_HOME/sal/config.toml`, with JSON also accepted as
 `config.json` in the same directory (TOML wins if both exist). `--config <path>`
-or `$HAL_CONFIG` selects a specific file. Keys use snake_case and mirror the
+or `$SAL_CONFIG` selects a specific file. Keys use snake_case and mirror the
 flag names:
 
 ```toml
@@ -329,7 +329,7 @@ auto_compact   = true            # summarize older messages when the window fill
 compact_at     = 80              # percent of the window that triggers it
 system_prompt        = ""        # text, or a path to a file
 append_system_prompt = ""
-session_dir    = ""              # default $XDG_DATA_HOME/hal/sessions
+session_dir    = ""              # default $XDG_DATA_HOME/sal/sessions
 session_header = ""              # "" = auto (see below)
 name           = ""              # default session display name
 no_session      = false
@@ -343,25 +343,25 @@ permissions warning.
 ### 6.4 Credentials and environment
 
 `api_key_env` names the environment variable holding the key (checked before
-`HAL_API_KEY`/`OPENAI_API_KEY`), so the secret stays in one place; a literal
+`SAL_API_KEY`/`OPENAI_API_KEY`), so the secret stays in one place; a literal
 `api_key` is the last resort and `--api-key` overrides everything.
 
 ```
-HAL_API_KEY / OPENAI_API_KEY          credentials
-HAL_BASE_URL / OPENAI_BASE_URL / OPENAI_API_BASE   endpoint
-HAL_MODEL / OPENAI_MODEL              model
-HAL_CONFIG                            config file path
-HAL_SESSION_DIR                       session storage root
-HAL_WEB_TOKEN                         access token for --web
+SAL_API_KEY / OPENAI_API_KEY          credentials
+SAL_BASE_URL / OPENAI_BASE_URL / OPENAI_API_BASE   endpoint
+SAL_MODEL / OPENAI_MODEL              model
+SAL_CONFIG                            config file path
+SAL_SESSION_DIR                       session storage root
+SAL_WEB_TOKEN                         access token for --web
 XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME   base directories
 ```
 
-`HAL_*` wins over the `OPENAI_*` aliases. Relative values in the `XDG_*`
+`SAL_*` wins over the `OPENAI_*` aliases. Relative values in the `XDG_*`
 variables are ignored, as the specification requires.
 
 ### 6.5 Gateway identity
 
-hal always sends `User-Agent: hal/<version>`, and sends a per-conversation
+sal always sends `User-Agent: sal/<version>`, and sends a per-conversation
 session id header when the endpoint is known to want one — currently
 `x-opencode-session` for `opencode.ai`. `session_header` in the config file
 names a different header, or `""` keeps the automatic choice. The id is the
@@ -371,7 +371,7 @@ random id.
 
 ### 6.6 System prompt and context files
 
-The default system prompt describes hal, its working directory, the OS/arch and
+The default system prompt describes sal, its working directory, the OS/arch and
 the date, and gives the model its working guidelines. `--system-prompt` replaces
 it (a value naming an existing file is read from disk);
 `--append-system-prompt` adds to it.
@@ -379,7 +379,7 @@ it (a value naming an existing file is read from disk);
 Unless `--no-context-files` is given, instruction files are discovered and
 appended:
 
-1. `AGENTS.md` or `CLAUDE.md` in `$XDG_CONFIG_HOME/hal` (the first that exists).
+1. `AGENTS.md` or `CLAUDE.md` in `$XDG_CONFIG_HOME/sal` (the first that exists).
 2. For each directory from the filesystem root down to the working directory,
    the first of `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md` that exists — one
    file per directory, so the working directory's file wins.
@@ -396,9 +396,9 @@ appended:
 
 ## 8. Security posture (as a feature)
 
-`bash` runs with the user's privileges and the model chooses what to run, so hal
+`bash` runs with the user's privileges and the model chooses what to run, so sal
 should be used in a directory one is willing to have modified, with model output
-treated as untrusted input (a file hal reads can prompt-inject arbitrary
+treated as untrusted input (a file sal reads can prompt-inject arbitrary
 commands). The supported mitigations are `--tools` to drop `bash`/`write`/`edit`
 for read-only work, and keeping `--web` on loopback. The web console binds to
 `127.0.0.1` by default and authenticates every request with its token; widening

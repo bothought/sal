@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/provider"
-	"github.com/Rushera/hal/internal/tools"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/provider"
+	"github.com/bothought/sal/internal/tools"
 )
 
 // Several gateways (opencode.ai among them) ask coding agents to identify
@@ -54,7 +54,7 @@ func TestProviderSendsIdentityHeaders(t *testing.T) {
 	mock := newMockServer(t, [][]string{textChunks("ok")})
 
 	prov := provider.NewFromEnv("k", mock.server.URL, "mock")
-	prov.UserAgent = "hal/test"
+	prov.UserAgent = "sal/test"
 	prov.SessionHeader = "x-opencode-session"
 	prov.SessionID = "session-abc-123"
 
@@ -68,8 +68,8 @@ func TestProviderSendsIdentityHeaders(t *testing.T) {
 		t.Fatal("mock recorded no headers")
 	}
 	h := mock.headers[0]
-	if got := h.Get("User-Agent"); got != "hal/test" {
-		t.Fatalf("User-Agent = %q, want hal/test", got)
+	if got := h.Get("User-Agent"); got != "sal/test" {
+		t.Fatalf("User-Agent = %q, want sal/test", got)
 	}
 	if got := h.Get("x-opencode-session"); got != "session-abc-123" {
 		t.Fatalf("x-opencode-session = %q, want session-abc-123", got)
@@ -92,7 +92,7 @@ func TestProviderOmitsSessionHeaderWhenUnset(t *testing.T) {
 	if h.Get("x-opencode-session") != "" {
 		t.Fatal("session header must not be sent when it is not configured")
 	}
-	if h.Get("User-Agent") == "hal/test" {
+	if h.Get("User-Agent") == "sal/test" {
 		t.Fatal("test user agent leaked")
 	}
 }
@@ -125,8 +125,8 @@ session_header = "x-opencode-session"
 	}
 
 	h := mock.headers[0]
-	if got := h.Get("User-Agent"); !strings.HasPrefix(got, "hal/") {
-		t.Fatalf("User-Agent = %q, want a hal/ prefix: gateways ask clients to identify themselves", got)
+	if got := h.Get("User-Agent"); !strings.HasPrefix(got, "sal/") {
+		t.Fatalf("User-Agent = %q, want a sal/ prefix: gateways ask clients to identify themselves", got)
 	}
 	id := h.Get("x-opencode-session")
 	if len(id) != 16 {

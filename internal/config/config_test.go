@@ -13,7 +13,7 @@ import (
 func withEnv(t *testing.T, home string, kv map[string]string) {
 	t.Helper()
 	t.Setenv("HOME", home)
-	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "HAL_CONFIG", "HAL_SESSION_DIR"} {
+	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "SAL_CONFIG", "SAL_SESSION_DIR"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -27,13 +27,13 @@ func TestResolveDefaultsToDotPaths(t *testing.T) {
 	withEnv(t, home, nil)
 
 	p := Resolve()
-	if want := filepath.Join(home, ".config", "hal"); p.ConfigDir != want {
+	if want := filepath.Join(home, ".config", "sal"); p.ConfigDir != want {
 		t.Fatalf("ConfigDir = %s, want %s", p.ConfigDir, want)
 	}
-	if want := filepath.Join(home, ".local", "share", "hal", "sessions"); p.SessionDir != want {
+	if want := filepath.Join(home, ".local", "share", "sal", "sessions"); p.SessionDir != want {
 		t.Fatalf("SessionDir = %s, want %s", p.SessionDir, want)
 	}
-	if want := filepath.Join(home, ".local", "state", "hal"); p.StateDir != want {
+	if want := filepath.Join(home, ".local", "state", "sal"); p.StateDir != want {
 		t.Fatalf("StateDir = %s, want %s", p.StateDir, want)
 	}
 }
@@ -50,16 +50,16 @@ func TestResolveHonorsXDGVariables(t *testing.T) {
 	})
 
 	p := Resolve()
-	if p.ConfigDir != filepath.Join(cfgHome, "hal") {
+	if p.ConfigDir != filepath.Join(cfgHome, "sal") {
 		t.Fatalf("ConfigDir = %s", p.ConfigDir)
 	}
-	if p.DataDir != filepath.Join(dataHome, "hal") {
+	if p.DataDir != filepath.Join(dataHome, "sal") {
 		t.Fatalf("DataDir = %s", p.DataDir)
 	}
-	if p.SessionDir != filepath.Join(dataHome, "hal", "sessions") {
+	if p.SessionDir != filepath.Join(dataHome, "sal", "sessions") {
 		t.Fatalf("SessionDir = %s", p.SessionDir)
 	}
-	if p.StateDir != filepath.Join(stateHome, "hal") {
+	if p.StateDir != filepath.Join(stateHome, "sal") {
 		t.Fatalf("StateDir = %s", p.StateDir)
 	}
 }
@@ -73,10 +73,10 @@ func TestResolveIgnoresRelativeXDGPaths(t *testing.T) {
 		"XDG_DATA_HOME":   "./data",
 	})
 	p := Resolve()
-	if p.ConfigDir != filepath.Join(home, ".config", "hal") {
+	if p.ConfigDir != filepath.Join(home, ".config", "sal") {
 		t.Fatalf("relative XDG_CONFIG_HOME should be ignored, got %s", p.ConfigDir)
 	}
-	if p.DataDir != filepath.Join(home, ".local", "share", "hal") {
+	if p.DataDir != filepath.Join(home, ".local", "share", "sal") {
 		t.Fatalf("relative XDG_DATA_HOME should be ignored, got %s", p.DataDir)
 	}
 }
@@ -90,7 +90,7 @@ func TestLoadTOML(t *testing.T) {
 	}
 	sessionDir := filepath.Join(t.TempDir(), "sessions")
 	content := fmt.Sprintf(`
-# hal configuration
+# sal configuration
 model = "gpt-4o"
 base_url = "https://example.test/v1"
 tools = "read,grep"
@@ -287,11 +287,11 @@ func TestSessionDirsFollowXDG(t *testing.T) {
 	p := Resolve()
 
 	// the canonical session location is always under XDG_DATA_HOME
-	if want := filepath.Join(home, ".local", "share", "hal", "sessions"); p.SessionDir != want {
+	if want := filepath.Join(home, ".local", "share", "sal", "sessions"); p.SessionDir != want {
 		t.Fatalf("SessionDir = %s, want %s", p.SessionDir, want)
 	}
-	// creating a ~/.hal directory must not move the canonical location
-	if err := os.MkdirAll(filepath.Join(home, ".hal", "sessions"), 0o755); err != nil {
+	// creating a ~/.sal directory must not move the canonical location
+	if err := os.MkdirAll(filepath.Join(home, ".sal", "sessions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if got := Resolve().SessionDir; got != p.SessionDir {
@@ -301,8 +301,8 @@ func TestSessionDirsFollowXDG(t *testing.T) {
 
 func TestConfigPathEnvOverride(t *testing.T) {
 	home := t.TempDir()
-	withEnv(t, home, map[string]string{"HAL_CONFIG": "/etc/hal/custom.toml"})
-	if got := Resolve().ConfigPath(); got != "/etc/hal/custom.toml" {
+	withEnv(t, home, map[string]string{"SAL_CONFIG": "/etc/sal/custom.toml"})
+	if got := Resolve().ConfigPath(); got != "/etc/sal/custom.toml" {
 		t.Fatalf("ConfigPath = %s", got)
 	}
 }

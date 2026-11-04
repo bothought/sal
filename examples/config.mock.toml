@@ -1,9 +1,9 @@
-# hal configuration preset for a local mock/OpenAI-compatible endpoint.
+# sal configuration preset for a local mock/OpenAI-compatible endpoint.
 #
-# Use it when you want to point hal at a stub server (or a local model server)
+# Use it when you want to point sal at a stub server (or a local model server)
 # without touching your real configuration:
 #
-#     hal --config examples/config.mock.toml -p "smoke test"
+#     sal --config examples/config.mock.toml -p "smoke test"
 #
 # Note that a config file passed with --config is authoritative for defaults, but
 # individual flags still override it.
@@ -15,10 +15,10 @@ model    = "mock-model"
 base_url = "http://127.0.0.1:8792/v1"
 
 # A local stub server does not check credentials, so no key is set: with an
-# empty one hal sends no Authorization header at all. If your server insists on
-# a value, export HAL_API_KEY (or name a variable with api_key_env) rather than
+# empty one sal sends no Authorization header at all. If your server insists on
+# a value, export SAL_API_KEY (or name a variable with api_key_env) rather than
 # putting a literal key here. A committed file is checked out world-readable, and
-# hal warns about a readable file that contains an api_key.
+# sal warns about a readable file that contains an api_key.
 api_key = ""
 
 # Keep the mock honest: fewer turns, and only the tools a test needs.
@@ -28,7 +28,7 @@ max_turns = 8
 append_system_prompt = "You are talking to a local mock endpoint used for smoke tests."
 
 # Keep mock runs out of the real session store so they do not pollute `-c`:
-session_dir = "~/.local/share/hal/mock-sessions"
+session_dir = "~/.local/share/sal/mock-sessions"
 
 name = "mock smoke test"
 

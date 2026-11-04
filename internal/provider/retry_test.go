@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rushera/hal/internal/agent"
+	"github.com/bothought/sal/internal/agent"
 )
 
 // transient checks whether err asks the agent to retry.
