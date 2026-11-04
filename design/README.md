@@ -1,6 +1,6 @@
-# hal design documents
+# sal design documents
 
-This directory is the design specification of hal: what the program does, and
+This directory is the design specification of sal: what the program does, and
 how it is built. The code is written against these documents, and documents are
 updated before (or together with) the code they describe.
 
@@ -12,10 +12,10 @@ rest of the working agreements.
 
 ```
 design/
-  features/                  what hal does
+  features/                  what sal does
     basic-functions/         the current feature set, coarse to fine
     context-management/      the context indicator and compaction
-  technical/                 how hal is built
+  technical/                 how sal is built
     architecture/            the current technical architecture
     context-compaction/      the technical design of context-management
 ```
@@ -72,7 +72,7 @@ The two kinds are written at deliberately different depths:
 
 | Item | Scope |
 |---|---|
-| [basic-functions](features/basic-functions/README.md) | Everything hal currently does: the agent loop, the tools, the four interfaces, sessions, configuration, and the guardrails around them. |
+| [basic-functions](features/basic-functions/README.md) | Everything sal currently does: the agent loop, the tools, the four interfaces, sessions, configuration, and the guardrails around them. |
 | [context-management](features/context-management/README.md) | The context window: a `used / limit` indicator, and compaction of older messages, automatic when the window fills or on `/compact`. |
 
 ### Technical

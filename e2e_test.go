@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/config"
-	"github.com/Rushera/hal/internal/provider"
-	"github.com/Rushera/hal/internal/session"
-	"github.com/Rushera/hal/internal/tools"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/config"
+	"github.com/bothought/sal/internal/provider"
+	"github.com/bothought/sal/internal/session"
+	"github.com/bothought/sal/internal/tools"
 )
 
 // newSessionFor creates a session in the configured store for the given cwd.
@@ -475,7 +475,7 @@ func TestContextFilesIncludeGlobalConfigDir(t *testing.T) {
 	_, cfgHome, _ := isolateXDG(t)
 	workdir := t.TempDir()
 
-	globalDir := filepath.Join(cfgHome, "hal")
+	globalDir := filepath.Join(cfgHome, "sal")
 	if err := os.MkdirAll(globalDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +489,7 @@ func TestContextFilesIncludeGlobalConfigDir(t *testing.T) {
 	}
 	found := false
 	for _, f := range files {
-		if strings.HasSuffix(f.path, filepath.Join("hal", "AGENTS.md")) {
+		if strings.HasSuffix(f.path, filepath.Join("sal", "AGENTS.md")) {
 			found = true
 			if !strings.Contains(f.label, "XDG_CONFIG_HOME") {
 				t.Fatalf("global context file not labelled as the config dir: %q", f.label)
@@ -497,7 +497,7 @@ func TestContextFilesIncludeGlobalConfigDir(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("AGENTS.md in $XDG_CONFIG_HOME/hal was not loaded: %+v", files)
+		t.Fatalf("AGENTS.md in $XDG_CONFIG_HOME/sal was not loaded: %+v", files)
 	}
 
 	// the content reaches the system prompt
@@ -563,7 +563,7 @@ func TestContextFilesDiscovery(t *testing.T) {
 func TestSessionPersistenceThroughAgent(t *testing.T) {
 	root := t.TempDir()
 	workdir := t.TempDir()
-	t.Setenv("HAL_SESSION_DIR", root)
+	t.Setenv("SAL_SESSION_DIR", root)
 
 	mock := newMockServer(t, [][]string{textChunks("noted")})
 	prov := provider.NewFromEnv("k", mock.server.URL, "mock")
@@ -998,7 +998,7 @@ func TestEndpointWindowIsUsedWhenNothingOverridesIt(t *testing.T) {
 func TestCompactionSurvivesAResume(t *testing.T) {
 	workdir := t.TempDir()
 	root := t.TempDir()
-	t.Setenv("HAL_SESSION_DIR", root)
+	t.Setenv("SAL_SESSION_DIR", root)
 
 	mock := newMockServer(t, [][]string{textChunks("the summary")})
 	mock.window = 100000
@@ -1069,7 +1069,7 @@ func TestCompactionSurvivesAResume(t *testing.T) {
 func TestResumeKeepsShortenedToolResults(t *testing.T) {
 	workdir := t.TempDir()
 	root := t.TempDir()
-	t.Setenv("HAL_SESSION_DIR", root)
+	t.Setenv("SAL_SESSION_DIR", root)
 
 	mock := newMockServer(t, [][]string{textChunks("the summary"), textChunks("done")})
 	prov := provider.NewFromEnv("k", mock.server.URL, "mock-model")

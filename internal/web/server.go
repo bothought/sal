@@ -1,4 +1,4 @@
-// Package web serves hal's console as a local web page: the same agent, tools,
+// Package web serves sal's console as a local web page: the same agent, tools,
 // session and event stream the terminal UI draws, rendered in a browser instead
 // of a TTY. It is a thin adapter over the agent loop -- every event the TUI would
 // render is forwarded to the page over server-sent events.
@@ -30,8 +30,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/session"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/session"
 )
 
 //go:embed index.html
@@ -230,7 +230,7 @@ func New(opts Options) *Server {
 	if token == "" && opts.TokenFile != "" {
 		t, err := loadOrCreateToken(opts.TokenFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "hal web: cannot use the token file %s: %v\n", opts.TokenFile, err)
+			fmt.Fprintf(os.Stderr, "sal web: cannot use the token file %s: %v\n", opts.TokenFile, err)
 		} else {
 			token = t
 		}
@@ -328,7 +328,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()
 
-	fmt.Fprintf(os.Stderr, "hal web console: %s\n", s.URL(ln.Addr().String()))
+	fmt.Fprintf(os.Stderr, "sal web console: %s\n", s.URL(ln.Addr().String()))
 
 	select {
 	case <-ctx.Done():
@@ -366,7 +366,7 @@ func (s *Server) Handler() http.Handler {
 // API even though it can reach loopback.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tok := r.Header.Get("X-Hal-Token")
+		tok := r.Header.Get("X-Sal-Token")
 		if tok == "" {
 			tok = r.URL.Query().Get("token")
 		}
@@ -405,7 +405,7 @@ func (s *Server) adoptSession(id string) {
 		return
 	}
 	if err := s.OpenSession(id); err != nil {
-		fmt.Fprintf(os.Stderr, "hal web: cannot open session %s: %v\n", id, err)
+		fmt.Fprintf(os.Stderr, "sal web: cannot open session %s: %v\n", id, err)
 	}
 }
 

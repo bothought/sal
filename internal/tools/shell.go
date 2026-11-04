@@ -127,7 +127,7 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	}
 	cmd := exec.Command(shell, "-c", a.Command)
 	cmd.Dir = workdir
-	cmd.Env = append(os.Environ(), "HAL=1")
+	cmd.Env = append(os.Environ(), "SAL=1")
 	buf := newCappedBuffer(maxBashOutput)
 	cmd.Stdout = buf
 	cmd.Stderr = buf

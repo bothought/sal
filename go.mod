@@ -1,4 +1,4 @@
-module github.com/Rushera/hal
+module github.com/bothought/sal
 
 go 1.27.1
 

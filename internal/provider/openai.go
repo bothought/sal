@@ -1,4 +1,4 @@
-// Package provider implements hal's model access layer: talking to a model.
+// Package provider implements sal's model access layer: talking to a model.
 // The bundled client speaks the OpenAI chat-completions protocol, which also
 // covers OpenAI-compatible servers (OpenRouter, Groq, Ollama, llama.cpp,
 // vLLM, LM Studio, ...).
@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Rushera/hal/internal/agent"
+	"github.com/bothought/sal/internal/agent"
 )
 
 // DefaultBaseURL is used when no endpoint is configured.
@@ -84,19 +84,19 @@ type modelLimit struct {
 }
 
 // NewFromEnv builds a provider from environment variables/flags. Precedence:
-// explicit arguments, then HAL_* then OPENAI_* then defaults.
+// explicit arguments, then SAL_* then OPENAI_* then defaults.
 func NewFromEnv(apiKey, baseURL, model string) *OpenAI {
 	if apiKey == "" {
-		apiKey = firstEnv("HAL_API_KEY", "OPENAI_API_KEY")
+		apiKey = firstEnv("SAL_API_KEY", "OPENAI_API_KEY")
 	}
 	if baseURL == "" {
-		baseURL = firstEnv("HAL_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE")
+		baseURL = firstEnv("SAL_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE")
 	}
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
 	if model == "" {
-		model = firstEnv("HAL_MODEL", "OPENAI_MODEL")
+		model = firstEnv("SAL_MODEL", "OPENAI_MODEL")
 	}
 	if model == "" {
 		model = DefaultModel
@@ -231,7 +231,7 @@ type streamChunk struct {
 // any tool calls the model requested.
 func (o *OpenAI) Stream(ctx context.Context, messages []agent.Message, tools []agent.ToolSpec, onText func(string)) (agent.Message, error) {
 	if o.Model == "" {
-		return agent.Message{}, fmt.Errorf("no model selected (use --model, /model, or HAL_MODEL)")
+		return agent.Message{}, fmt.Errorf("no model selected (use --model, /model, or SAL_MODEL)")
 	}
 
 	req := chatRequest{
@@ -536,7 +536,7 @@ func convertMessages(messages []agent.Message) []wireMessage {
 // Ping performs a cheap credential/model check used at startup in print mode.
 func (o *OpenAI) Ping(ctx context.Context) error {
 	if o.APIKey == "" {
-		return fmt.Errorf("no API key found: set HAL_API_KEY or OPENAI_API_KEY, or pass --api-key")
+		return fmt.Errorf("no API key found: set SAL_API_KEY or OPENAI_API_KEY, or pass --api-key")
 	}
 	return nil
 }

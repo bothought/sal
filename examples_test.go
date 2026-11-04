@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Rushera/hal/internal/config"
-	"github.com/Rushera/hal/internal/session"
+	"github.com/bothought/sal/internal/config"
+	"github.com/bothought/sal/internal/session"
 )
 
 // The example config files are documentation that users copy. These tests keep
@@ -139,10 +139,10 @@ func TestAPIKeyEnvPrecedence(t *testing.T) {
 	// so do the generic ones when no name is configured
 	cfg2 := config.Loaded{Path: filepath.Join(t.TempDir(), "config.toml")}
 	t.Setenv("GATEWAY_API_KEY", "gateway")
-	t.Setenv("HAL_API_KEY", "generic")
+	t.Setenv("SAL_API_KEY", "generic")
 	resolved, _ = resolveOptions(opts, set, cfg2)
 	if resolved.apiKey != "generic" {
-		t.Fatalf("HAL_API_KEY should win: %q", resolved.apiKey)
+		t.Fatalf("SAL_API_KEY should win: %q", resolved.apiKey)
 	}
 
 	// a flag beats everything
@@ -206,10 +206,10 @@ func TestExamplesDriveResolution(t *testing.T) {
 		t.Fatalf("mock max_turns not resolved: %d", resolved.maxTurns)
 	}
 	// the value stays as written for --show-config reporting, and expands when used
-	if resolved.sessionDir != "~/.local/share/hal/mock-sessions" {
+	if resolved.sessionDir != "~/.local/share/sal/mock-sessions" {
 		t.Fatalf("session_dir should be reported as written: %q", resolved.sessionDir)
 	}
-	if got, want := session.RootWith(resolved.sessionDir), config.ExpandPath("~/.local/share/hal/mock-sessions"); got != want {
+	if got, want := session.RootWith(resolved.sessionDir), config.ExpandPath("~/.local/share/sal/mock-sessions"); got != want {
 		t.Fatalf("mock session_dir did not expand: got %s want %s", got, want)
 	}
 
@@ -224,7 +224,7 @@ func TestExamplesDriveResolution(t *testing.T) {
 
 // TestExamplesCarryNoLiteralSecret pins a property a checkout cannot change:
 // example files are committed and therefore arrive world-readable, so any
-// literal api_key in one produces the permissions warning hal is supposed to
+// literal api_key in one produces the permissions warning sal is supposed to
 // give — which the loader here treats as a schema failure. The bug this
 // prevents was invisible locally, where a umask of 077 made the file 0600.
 func TestExamplesCarryNoLiteralSecret(t *testing.T) {

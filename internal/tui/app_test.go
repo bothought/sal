@@ -11,8 +11,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/session"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/session"
 )
 
 // fakeAgent is a scripted stand-in for *agent.Agent.
@@ -169,7 +169,7 @@ func TestSubmitRunsAgentAndRendersTranscript(t *testing.T) {
 	}}
 	m, ch := newTestModel(t, fa)
 
-	if !strings.HasPrefix(m.View(), "hal test") {
+	if !strings.HasPrefix(m.View(), "sal test") {
 		t.Fatalf("header missing from the view:\n%s", m.View())
 	}
 

@@ -30,9 +30,9 @@ All notable changes to this project are documented here. The format follows
   stored for the directory (`↑`/`↓`, `enter`, `esc`), `/switch <id>` opens one
   directly, and `/sessions` lists them; switching aborts a turn in flight and
   replays the conversation it switched to. The web console gets a session menu in
-  the header and the same `/switch` / `/sessions` commands. `hal
+  the header and the same `/switch` / `/sessions` commands. `sal
   --list-sessions` prints the stored conversations with the ids `--session`
-  accepts, and `hal --continue-all` resumes the most recent session for the
+  accepts, and `sal --continue-all` resumes the most recent session for the
   machine rather than only for the working directory.
 - **Retries for transient provider failures.** A reset connection
   (`read: connection reset by peer`), a timeout, a `429`, or a `5xx` is now
@@ -67,13 +67,13 @@ All notable changes to this project are documented here. The format follows
   `65k` for a `deepseek` model) for the whole conversation, even though the
   endpoint publishes the real one.
 - The web console reuses its access token from
-  `$XDG_STATE_HOME/hal/web-token` (overridable with `--web-token` or
-  `$HAL_WEB_TOKEN`), so a restarted process keeps serving a page that is already
+  `$XDG_STATE_HOME/sal/web-token` (overridable with `--web-token` or
+  `$SAL_WEB_TOKEN`), so a restarted process keeps serving a page that is already
   open: reload the tab instead of reopening the URL.
 - The console URL carries the session id. Loading a URL that names another
   session reopens it, and the transcript is rebuilt from the stored conversation
   — including tool calls and their output, marked with a `restored` note — so a
-  reload or a restart shows the whole conversation again. `hal --web -c` resumes
+  reload or a restart shows the whole conversation again. `sal --web -c` resumes
   the latest session for the directory, which is what a rebuild-and-reload loop
   wants.
 
@@ -98,5 +98,5 @@ First release.
   `--append-system-prompt`, and per-conversation session headers for gateways
   that route agent traffic.
 
-[Unreleased]: https://github.com/Rushera/hal/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Rushera/hal/releases/tag/v0.1.0
+[Unreleased]: https://github.com/bothought/sal/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/bothought/sal/releases/tag/v0.1.0

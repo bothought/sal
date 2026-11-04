@@ -1,10 +1,10 @@
-# hal configuration preset for a third-party gateway: a service that speaks the
+# sal configuration preset for a third-party gateway: a service that speaks the
 # OpenAI chat-completions protocol but wants its own credential variable and a
 # per-conversation session header.
 #
-# Use it explicitly, or copy it to $XDG_CONFIG_HOME/hal/config.toml:
+# Use it explicitly, or copy it to $XDG_CONFIG_HOME/sal/config.toml:
 #
-#     hal --config examples/config.gateway.toml -p "hello"
+#     sal --config examples/config.gateway.toml -p "hello"
 #
 # The protocol is what `provider` selects, so it stays "openai"; `base_url`
 # picks the actual service.
@@ -16,7 +16,7 @@ model = "example-model"
 base_url = "https://gateway.example.com/v1"
 
 # Name the environment variable holding the credential rather than pasting the
-# secret into this file. hal checks it before HAL_API_KEY / OPENAI_API_KEY.
+# secret into this file. sal checks it before SAL_API_KEY / OPENAI_API_KEY.
 api_key = ""
 api_key_env = "GATEWAY_API_KEY"
 

@@ -1,11 +1,11 @@
-// Package config loads hal's configuration file and resolves its storage
+// Package config loads sal's configuration file and resolves its storage
 // locations following the XDG Base Directory Specification.
 //
 // Layout:
 //
-//	$XDG_CONFIG_HOME/hal/config.toml   (or config.json)   user configuration
-//	$XDG_DATA_HOME/hal/sessions/                          session files
-//	$XDG_STATE_HOME/hal/web-token                         web console token
+//	$XDG_CONFIG_HOME/sal/config.toml   (or config.json)   user configuration
+//	$XDG_DATA_HOME/sal/sessions/                          session files
+//	$XDG_STATE_HOME/sal/web-token                         web console token
 //
 // XDG_CONFIG_HOME defaults to ~/.config, XDG_DATA_HOME to ~/.local/share and
 // XDG_STATE_HOME to ~/.local/state. Relative values in those variables are
@@ -23,11 +23,11 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Paths holds hal's resolved directories.
+// Paths holds sal's resolved directories.
 type Paths struct {
-	ConfigDir string // $XDG_CONFIG_HOME/hal
-	DataDir   string // $XDG_DATA_HOME/hal
-	StateDir  string // $XDG_STATE_HOME/hal
+	ConfigDir string // $XDG_CONFIG_HOME/sal
+	DataDir   string // $XDG_DATA_HOME/sal
+	StateDir  string // $XDG_STATE_HOME/sal
 	// SessionDir is the XDG location for session files.
 	SessionDir string
 }
@@ -42,10 +42,10 @@ func Resolve() Paths {
 	dataHome := xdgPath("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	stateHome := xdgPath("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	return Paths{
-		ConfigDir:  filepath.Join(cfgHome, "hal"),
-		DataDir:    filepath.Join(dataHome, "hal"),
-		StateDir:   filepath.Join(stateHome, "hal"),
-		SessionDir: filepath.Join(dataHome, "hal", "sessions"),
+		ConfigDir:  filepath.Join(cfgHome, "sal"),
+		DataDir:    filepath.Join(dataHome, "sal"),
+		StateDir:   filepath.Join(stateHome, "sal"),
+		SessionDir: filepath.Join(dataHome, "sal", "sessions"),
 	}
 }
 
@@ -58,9 +58,9 @@ func xdgPath(env, fallback string) string {
 	return fallback
 }
 
-// ConfigPath returns the config file location, overridable with $HAL_CONFIG.
+// ConfigPath returns the config file location, overridable with $SAL_CONFIG.
 func (p Paths) ConfigPath() string {
-	if v := strings.TrimSpace(os.Getenv("HAL_CONFIG")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("SAL_CONFIG")); v != "" {
 		return v
 	}
 	return filepath.Join(p.ConfigDir, "config.toml")
@@ -81,12 +81,12 @@ type File struct {
 	Provider string `toml:"provider" json:"provider"`
 	Model    string `toml:"model" json:"model"`
 	BaseURL  string `toml:"base_url" json:"base_url"`
-	// APIKey works but the HAL_API_KEY environment variable is preferred, so
+	// APIKey works but the SAL_API_KEY environment variable is preferred, so
 	// credentials stay out of dotfiles.
 	APIKey string `toml:"api_key" json:"api_key"`
 	// APIKeyEnv names an environment variable to read the key from instead of
 	// storing it here, e.g. "GATEWAY_API_KEY". Checked before the generic
-	// HAL_API_KEY / OPENAI_API_KEY variables.
+	// SAL_API_KEY / OPENAI_API_KEY variables.
 	APIKeyEnv string `toml:"api_key_env" json:"api_key_env"`
 	// Tools is a comma-separated allowlist of built-in tools.
 	Tools string `toml:"tools" json:"tools"`
@@ -242,7 +242,7 @@ func loadFile(path string, required bool) (Loaded, error) {
 	if f.APIKey != "" {
 		if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 {
 			l.Warnings = append(l.Warnings, fmt.Sprintf(
-				"%s is readable by other users (%04o) but contains an api_key; prefer the HAL_API_KEY environment variable or chmod 600",
+				"%s is readable by other users (%04o) but contains an api_key; prefer the SAL_API_KEY environment variable or chmod 600",
 				path, st.Mode().Perm()))
 		}
 	}

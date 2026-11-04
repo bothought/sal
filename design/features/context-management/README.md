@@ -17,7 +17,7 @@ compaction) belongs to the technical item
 
 ## 1. Purpose
 
-A long conversation eventually exceeds what the model accepts. Today hal has no
+A long conversation eventually exceeds what the model accepts. Today sal has no
 notion of that limit: the footer reports cumulative token totals, which say how
 much has been spent, not how full the window is, and the first sign of trouble is
 a provider error rejecting the request. The user cannot plan around a limit they
@@ -60,7 +60,7 @@ window it represents.
   cumulative `↑`/`↓` counts, and turn count:
 
   ```
-  ~/work/hal        gpt-4o-mini · ready · ctx ~12.4k/128k 10% · ↑120k ↓8.2k · 3 turns
+  ~/work/sal        gpt-4o-mini · ready · ctx ~12.4k/128k 10% · ↑120k ↓8.2k · 3 turns
   ```
 
   The cumulative `↑`/`↓` counters stay as they are; they answer a different
@@ -105,7 +105,7 @@ Resolution is per setting, highest priority first:
 1. **Explicit configuration** — `--context-window <tokens>` or `context_window`
    in the config file. Always wins, and is never second-guessed.
 2. **The endpoint's model metadata** — when the OpenAI-compatible service
-   publishes a context limit for the selected model, hal uses it. This is
+   publishes a context limit for the selected model, sal uses it. This is
    best-effort: many services publish nothing, and a service that cannot be
    reached for metadata is not an error — resolution simply continues to (3).
 3. **A built-in table** for common model families, matched by model id prefix
@@ -407,7 +407,7 @@ convenience, since that is how model limits are usually written.
 
 No new environment variables are introduced: these three settings are chosen once
 per session and belong in the config file, not in a shell profile. The existing
-`HAL_*` variables are unchanged.
+`SAL_*` variables are unchanged.
 
 With `--no-session`, compaction still works — it changes what is sent to the
 model, which is independent of whether the conversation is stored — but nothing

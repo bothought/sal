@@ -4,7 +4,7 @@ Thanks for considering a contribution. Issues and pull requests are welcome.
 
 ## Ground rules
 
-- Keep the tool set small. hal deliberately ships one provider protocol
+- Keep the tool set small. sal deliberately ships one provider protocol
   (OpenAI chat completions) and seven tools; features that need a plugin system
   or a vendor matrix are out of scope (see the README's *Limitations*).
 - Match the existing style: standard library first, small interfaces, doc
@@ -16,7 +16,7 @@ Thanks for considering a contribution. Issues and pull requests are welcome.
 ## Working on the code
 
 ```bash
-git clone https://github.com/Rushera/hal && cd hal
+git clone https://github.com/bothought/sal && cd sal
 go build ./...
 go vet ./...
 go test ./...
@@ -38,5 +38,5 @@ tool already documents).
 
 ## License
 
-hal is GPL-3.0-or-later. By submitting a contribution you agree to license it
+sal is GPL-3.0-or-later. By submitting a contribution you agree to license it
 under the same terms.

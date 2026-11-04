@@ -1,18 +1,18 @@
 # Architecture
 
-This document is the technical description of hal: which parts the program is
+This document is the technical description of sal: which parts the program is
 made of, what each part is responsible for, how the parts fit together, and
 which invariants keep them honest.
 
 It describes the architecture, not the implementation. Locating a behaviour in
 the code, and the shape of the code inside a part, are the code's own business:
 every package documents itself, and the names there are the ones to read. What
-hal *does* is `design/features/basic-functions`; the two documents are
+sal *does* is `design/features/basic-functions`; the two documents are
 deliberately separate, and neither absorbs the other.
 
 ## 1. Shape of the program
 
-hal is a single Go module producing one static binary. One package is the entry
+sal is a single Go module producing one static binary. One package is the entry
 point and the only place that wires the parts together; everything else lives
 under `internal/` in a package whose name says what it owns:
 

@@ -1,4 +1,4 @@
-// Command hal is a minimal coding agent written in Go with bubbletea. It runs
+// Command sal is a minimal coding agent written in Go with bubbletea. It runs
 // an agent loop over an OpenAI-compatible provider with the
 // read/bash/edit/write/grep/find/ls tools, a terminal UI, JSONL sessions, and
 // print/JSON modes.
@@ -24,13 +24,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
-	"github.com/Rushera/hal/internal/agent"
-	"github.com/Rushera/hal/internal/config"
-	"github.com/Rushera/hal/internal/provider"
-	"github.com/Rushera/hal/internal/session"
-	"github.com/Rushera/hal/internal/tools"
-	"github.com/Rushera/hal/internal/tui"
-	"github.com/Rushera/hal/internal/web"
+	"github.com/bothought/sal/internal/agent"
+	"github.com/bothought/sal/internal/config"
+	"github.com/bothought/sal/internal/provider"
+	"github.com/bothought/sal/internal/session"
+	"github.com/bothought/sal/internal/tools"
+	"github.com/bothought/sal/internal/tui"
+	"github.com/bothought/sal/internal/web"
 )
 
 const version = "0.1.0"
@@ -91,7 +91,7 @@ func (v *sizeValue) Set(s string) error {
 
 func main() {
 	if err := runWithArgs(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "hal: "+err.Error())
+		fmt.Fprintln(os.Stderr, "sal: "+err.Error())
 		os.Exit(1)
 	}
 }
@@ -110,14 +110,14 @@ func runWithArgs(args []string) error {
 	paths := config.Resolve()
 	explicit := opts.configPath
 	if explicit == "" {
-		explicit = os.Getenv("HAL_CONFIG")
+		explicit = os.Getenv("SAL_CONFIG")
 	}
 	cfg, err := config.Load(explicit, paths)
 	if err != nil {
 		return err
 	}
 	for _, w := range cfg.Warnings {
-		fmt.Fprintln(os.Stderr, "hal: warning: "+w)
+		fmt.Fprintln(os.Stderr, "sal: warning: "+w)
 	}
 	opts, sources := resolveOptions(opts, setFlags, cfg)
 	if err := validateResolved(opts); err != nil {
@@ -129,7 +129,7 @@ func runWithArgs(args []string) error {
 		return nil
 	}
 	if opts.showVersion {
-		fmt.Println("hal " + version)
+		fmt.Println("sal " + version)
 		return nil
 	}
 	if opts.listSessions {
@@ -142,7 +142,7 @@ func runWithArgs(args []string) error {
 		return err
 	}
 
-	// stdin piping: `cat file | hal -p "summarize"` merges stdin into the prompt
+	// stdin piping: `cat file | sal -p "summarize"` merges stdin into the prompt
 	var stdinText string
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		if data, err := io.ReadAll(io.LimitReader(os.Stdin, 4*1024*1024)); err == nil {
@@ -158,7 +158,7 @@ func runWithArgs(args []string) error {
 	prov := provider.NewFromEnv(opts.apiKey, opts.baseURL, opts.model)
 	// Identify ourselves, and carry a per-conversation id for gateways that
 	// route on it (opencode.ai requires x-opencode-session).
-	prov.UserAgent = "hal/" + version
+	prov.UserAgent = "sal/" + version
 	prov.SessionHeader = sessionHeaderFor(cfg.File.SessionHeader, prov.BaseURL)
 	prov.SessionID = newRunID()
 	toolList, err := tools.Select(cwd, opts.toolList)
@@ -216,7 +216,7 @@ func runWithArgs(args []string) error {
 			}
 		case opts.cont:
 			// Continuing with nothing stored yet starts a fresh session instead of
-			// failing, so "hal --web -c" works on the first run of a directory.
+			// failing, so "sal --web -c" works on the first run of a directory.
 			latest, lerr := session.LatestIn(session.SearchRoots(opts.sessionDir), cwd, false)
 			switch {
 			case errors.Is(lerr, session.ErrNoSessions):
@@ -242,7 +242,7 @@ func runWithArgs(args []string) error {
 		}
 		ag.OnMessage = func(m agent.Message) {
 			if err := sess.AppendMessage(m); err != nil {
-				fmt.Fprintln(os.Stderr, "hal: session write failed: "+err.Error())
+				fmt.Fprintln(os.Stderr, "sal: session write failed: "+err.Error())
 			}
 		}
 		ag.OnCompaction = func(c agent.Compacted) {
@@ -252,7 +252,7 @@ func runWithArgs(args []string) error {
 				Shortened:    c.Shortened,
 				ShortenedIDs: sess.MessageIDs(c.ShortenedIndexes),
 			}, sess.MessageID(c.Through)); err != nil {
-				fmt.Fprintln(os.Stderr, "hal: session write failed: "+err.Error())
+				fmt.Fprintln(os.Stderr, "sal: session write failed: "+err.Error())
 			}
 		}
 		// The conversation id doubles as the provider's affinity id, so a
@@ -289,7 +289,7 @@ func runWithArgs(args []string) error {
 // user actually typed, which is what makes flag-over-config precedence possible.
 func parseArgs(args []string) (options, map[string]bool, error) {
 	o := options{}
-	fs := flag.NewFlagSet("hal", flag.ContinueOnError)
+	fs := flag.NewFlagSet("sal", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usageText()) }
 
@@ -301,15 +301,15 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 	fs.BoolVar(&o.contAll, "continue-all", false, "continue the most recent session for this directory or any other on this machine")
 	fs.BoolVar(&o.listSessions, "list-sessions", false, "list the stored sessions and exit")
 	fs.StringVar(&o.sessionPath, "session", "", "session file to open")
-	fs.StringVar(&o.sessionDir, "session-dir", "", "session storage directory (default $XDG_DATA_HOME/hal/sessions)")
+	fs.StringVar(&o.sessionDir, "session-dir", "", "session storage directory (default $XDG_DATA_HOME/sal/sessions)")
 	fs.BoolVar(&o.noSession, "no-session", false, "do not save the session")
 	fs.StringVar(&o.name, "n", "", "session display name")
 	fs.StringVar(&o.name, "name", "", "session display name")
-	fs.StringVar(&o.model, "model", "", "model id (default $HAL_MODEL, $OPENAI_MODEL, gpt-4o-mini)")
+	fs.StringVar(&o.model, "model", "", "model id (default $SAL_MODEL, $OPENAI_MODEL, gpt-4o-mini)")
 	fs.StringVar(&o.model, "m", "", "model id (shorthand for --model)")
 	fs.StringVar(&o.providerName, "provider", "openai", "provider name (only openai-compatible is bundled)")
-	fs.StringVar(&o.apiKey, "api-key", "", "API key (default $HAL_API_KEY, $OPENAI_API_KEY)")
-	fs.StringVar(&o.baseURL, "base-url", "", "endpoint base URL (default $HAL_BASE_URL, $OPENAI_BASE_URL)")
+	fs.StringVar(&o.apiKey, "api-key", "", "API key (default $SAL_API_KEY, $OPENAI_API_KEY)")
+	fs.StringVar(&o.baseURL, "base-url", "", "endpoint base URL (default $SAL_BASE_URL, $OPENAI_BASE_URL)")
 	fs.StringVar(&o.toolList, "t", "", "comma-separated tool allowlist (default: all built-ins)")
 	fs.StringVar(&o.toolList, "tools", "", "comma-separated tool allowlist (default: all built-ins)")
 	fs.BoolVar(&o.noContext, "nc", false, "do not load AGENTS.md/CLAUDE.md context files")
@@ -322,13 +322,13 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 	fs.BoolVar(&o.autoCompact, "auto-compact", true, "compact older messages when the context window fills")
 	fs.BoolVar(&o.noAutoCompact, "no-auto-compact", false, "never compact automatically")
 	fs.IntVar(&o.compactAt, "compact-at", agent.DefaultCompactAt, "percentage of the context window at which automatic compaction runs")
-	fs.StringVar(&o.configPath, "config", "", "configuration file (default $XDG_CONFIG_HOME/hal/config.toml)")
+	fs.StringVar(&o.configPath, "config", "", "configuration file (default $XDG_CONFIG_HOME/sal/config.toml)")
 	fs.BoolVar(&o.showConfig, "show-config", false, "print the resolved configuration and exit")
 	fs.BoolVar(&o.showVersion, "v", false, "print version and exit")
 	fs.BoolVar(&o.showVersion, "version", false, "print version and exit")
 	fs.BoolVar(&o.web, "web", false, "serve the console in a browser instead of the terminal")
 	fs.StringVar(&o.webAddr, "web-addr", "127.0.0.1:8080", "address for --web to listen on")
-	fs.StringVar(&o.webToken, "web-token", "", "access token for --web (default $HAL_WEB_TOKEN, else a token persisted in the state directory)")
+	fs.StringVar(&o.webToken, "web-token", "", "access token for --web (default $SAL_WEB_TOKEN, else a token persisted in the state directory)")
 
 	if err := fs.Parse(args); err != nil {
 		return o, nil, err
@@ -382,11 +382,11 @@ func newRunID() string {
 	return hex.EncodeToString(b)
 }
 
-// validateResolved rejects settings hal cannot honor, naming the config file
+// validateResolved rejects settings sal cannot honor, naming the config file
 // when that is where the value came from.
 func validateResolved(o options) error {
 	if o.providerName != "" && !strings.EqualFold(o.providerName, "openai") {
-		return fmt.Errorf("only the openai provider is bundled in hal (got %q); set provider = \"openai\"", o.providerName)
+		return fmt.Errorf("only the openai provider is bundled in sal (got %q); set provider = \"openai\"", o.providerName)
 	}
 	if o.contextWin < 0 {
 		return fmt.Errorf("context_window must not be negative (got %d)", o.contextWin)
@@ -465,16 +465,16 @@ func resolveOptions(o options, set map[string]bool, cfg config.Loaded) (options,
 
 	o.providerName = pickString("provider", o.providerName, []string{"provider"}, nil, cfg.File.Provider, "openai")
 	o.model = pickString("model", o.model, []string{"model", "m"},
-		[]string{"HAL_MODEL", "OPENAI_MODEL"}, cfg.File.Model, provider.DefaultModel)
+		[]string{"SAL_MODEL", "OPENAI_MODEL"}, cfg.File.Model, provider.DefaultModel)
 	o.baseURL = pickString("base_url", o.baseURL, []string{"base-url"},
-		[]string{"HAL_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE"}, cfg.File.BaseURL, provider.DefaultBaseURL)
+		[]string{"SAL_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE"}, cfg.File.BaseURL, provider.DefaultBaseURL)
 	// A config file may name the variable holding the key, so the secret can stay
 	// in one place instead of being copied into a dotfile.
 	keyEnvNames := make([]string, 0, 3)
 	if name := strings.TrimSpace(cfg.File.APIKeyEnv); name != "" {
 		keyEnvNames = append(keyEnvNames, name)
 	}
-	keyEnvNames = append(keyEnvNames, "HAL_API_KEY", "OPENAI_API_KEY")
+	keyEnvNames = append(keyEnvNames, "SAL_API_KEY", "OPENAI_API_KEY")
 	o.apiKey = pickString("api_key", o.apiKey, []string{"api-key"}, keyEnvNames, cfg.File.APIKey, "")
 	o.toolList = pickString("tools", o.toolList, []string{"tools", "t"}, nil, cfg.File.Tools, "")
 	o.maxTurns = pickInt("max_turns", o.maxTurns, []string{"max-turns"}, cfg.File.MaxTurns, 32)
@@ -503,7 +503,7 @@ func resolveOptions(o options, set map[string]bool, cfg config.Loaded) (options,
 	o.systemPrompt = pickString("system_prompt", o.systemPrompt, []string{"system-prompt"}, nil, cfg.File.SystemPrompt, "")
 	o.appendPrompt = pickString("append_system_prompt", o.appendPrompt, []string{"append-system-prompt"}, nil, cfg.File.AppendSystemPrompt, "")
 	o.sessionDir = pickString("session_dir", o.sessionDir, []string{"session-dir"},
-		[]string{"HAL_SESSION_DIR"}, cfg.File.SessionDir, "")
+		[]string{"SAL_SESSION_DIR"}, cfg.File.SessionDir, "")
 	o.name = pickString("name", o.name, []string{"name", "n"}, nil, cfg.File.Name, "")
 	o.noSession = pickBool("no_session", o.noSession, []string{"no-session"}, cfg.File.NoSession)
 	o.noContext = pickBool("no_context_files", o.noContext, []string{"nc", "no-context-files"}, cfg.File.NoContextFiles)
@@ -511,7 +511,7 @@ func resolveOptions(o options, set map[string]bool, cfg config.Loaded) (options,
 	// local secret, and the default (reuse or create the state-dir token) is what
 	// keeps an open browser tab working across restarts.
 	if o.webToken == "" {
-		o.webToken = strings.TrimSpace(os.Getenv("HAL_WEB_TOKEN"))
+		o.webToken = strings.TrimSpace(os.Getenv("SAL_WEB_TOKEN"))
 	}
 	return o, sources
 }
@@ -538,7 +538,7 @@ func cwdForList() string {
 func printSessions(root, cwd string) {
 	infos, err := session.List(root, cwd, false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hal: cannot list sessions: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sal: cannot list sessions: %v\n", err)
 		return
 	}
 	if len(infos) == 0 {
@@ -553,7 +553,7 @@ func printSessions(root, cwd string) {
 			fmt.Printf("  %-10s   model %s\n", "", info.Model)
 		}
 	}
-	fmt.Printf("\nresume with: hal --session <id>\n")
+	fmt.Printf("\nresume with: sal --session <id>\n")
 }
 
 // printConfig shows the resolved settings and where each value came from.
@@ -562,7 +562,7 @@ func printConfig(o options, sources []settingSource, cfg config.Loaded, paths co
 	if configFile == "" {
 		configFile = "(none found)"
 	}
-	fmt.Printf("hal %s\n\npaths:\n", version)
+	fmt.Printf("sal %s\n\npaths:\n", version)
 	fmt.Printf("  config file   %s\n", configFile)
 	fmt.Printf("  config dir    %s\n", paths.ConfigDir)
 	fmt.Printf("  session dir   %s\n", session.RootWith(o.sessionDir))
@@ -666,7 +666,7 @@ func contextFiles(cwd string) ([]contextFile, error) {
 	paths := config.Resolve()
 	seen := map[string]bool{}
 	for _, g := range []struct{ dir, label string }{
-		{paths.ConfigDir, "$XDG_CONFIG_HOME/hal"},
+		{paths.ConfigDir, "$XDG_CONFIG_HOME/sal"},
 	} {
 		if g.dir == "" || seen[g.dir] {
 			continue
@@ -728,15 +728,15 @@ func runPrint(ctx context.Context, ag *agent.Agent, prompt string, out, errOut i
 				fmt.Fprintf(errOut, "  ↳ %s (%dms)\n", status, ev.Result.DurationMS)
 			}
 		case agent.EventError:
-			fmt.Fprintln(errOut, "hal: "+ev.Error)
+			fmt.Fprintln(errOut, "sal: "+ev.Error)
 		case agent.EventRetry:
-			fmt.Fprintf(errOut, "hal: transient failure, retrying (attempt %d of %d in %.1fs): %s\n",
+			fmt.Fprintf(errOut, "sal: transient failure, retrying (attempt %d of %d in %.1fs): %s\n",
 				ev.Attempt, ev.MaxAttempts, float64(ev.RetryInMS)/1000, ev.Error)
 		case agent.EventCompaction:
 			// stdout stays the answer alone, so the notice goes where tool
 			// activity already goes.
 			if ev.Compaction != nil {
-				fmt.Fprintln(errOut, "hal: "+compactionNotice(*ev.Compaction))
+				fmt.Fprintln(errOut, "sal: "+compactionNotice(*ev.Compaction))
 			}
 		}
 	})
@@ -968,10 +968,10 @@ func truncate(s string, n int) string {
 }
 
 func usageText() string {
-	return `hal — a minimal coding agent in Go (bubbletea)
+	return `sal — a minimal coding agent in Go (bubbletea)
 
 usage:
-  hal [options] [--] [@files...] [messages...]
+  sal [options] [--] [@files...] [messages...]
 
 modes:
   (default)            interactive terminal UI
@@ -1006,24 +1006,24 @@ options:
   --no-auto-compact    never compact automatically
   --compact-at <pct>   percentage of the window at which automatic compaction
                        runs (default 80)
-  --config <path>      configuration file (default $XDG_CONFIG_HOME/hal/config.toml)
+  --config <path>      configuration file (default $XDG_CONFIG_HOME/sal/config.toml)
   --show-config        print the resolved configuration and exit
   --web                serve the console in a browser instead of the terminal
   --web-addr <addr>    address for --web to listen on (default 127.0.0.1:8080)
-  --web-token <token>  access token for --web (default $HAL_WEB_TOKEN, else a
-                       token persisted in $XDG_STATE_HOME/hal/web-token, so an
+  --web-token <token>  access token for --web (default $SAL_WEB_TOKEN, else a
+                       token persisted in $XDG_STATE_HOME/sal/web-token, so an
                        open browser tab keeps working across a restart)
   -h, --help           show this help
   -v, --version        show the version
 
 configuration file:
-  TOML at $XDG_CONFIG_HOME/hal/config.toml (JSON also accepted as config.json).
+  TOML at $XDG_CONFIG_HOME/sal/config.toml (JSON also accepted as config.json).
   XDG_CONFIG_HOME defaults to ~/.config. Keys use snake_case and match the
   flag names:
 
     model    = "gpt-4o-mini"
     base_url = "https://api.openai.com/v1"
-    api_key  = ""                 # prefer the HAL_API_KEY environment variable
+    api_key  = ""                 # prefer the SAL_API_KEY environment variable
     api_key_env = ""              # or name a variable, e.g. GATEWAY_API_KEY
     tools    = "read,edit"        # comma-separated allowlist
     max_turns = 32
@@ -1033,7 +1033,7 @@ configuration file:
     compact_at = 80               # percent of the window
     system_prompt = ""            # text, or a path to a file
     no_context_files = false
-    session_dir = ""              # default $XDG_DATA_HOME/hal/sessions
+    session_dir = ""              # default $XDG_DATA_HOME/sal/sessions
     session_header = ""           # "" = auto (x-opencode-session on opencode.ai)
 
   Context: the footer shows "ctx used/limit percent". Older messages are
@@ -1041,26 +1041,26 @@ configuration file:
   and /context explains the figure.
 
   Precedence per setting: flag > environment > config file > default.
-  Run 'hal --show-config' to see the resolved values and their sources.
+  Run 'sal --show-config' to see the resolved values and their sources.
 
 environment:
-  HAL_API_KEY / OPENAI_API_KEY      credentials
-  HAL_BASE_URL / OPENAI_BASE_URL    endpoint (default https://api.openai.com/v1)
-  HAL_MODEL / OPENAI_MODEL          model (default gpt-4o-mini)
-  HAL_CONFIG                        configuration file path
-  HAL_SESSION_DIR                   session storage root
-  HAL_WEB_TOKEN                     access token for --web
+  SAL_API_KEY / OPENAI_API_KEY      credentials
+  SAL_BASE_URL / OPENAI_BASE_URL    endpoint (default https://api.openai.com/v1)
+  SAL_MODEL / OPENAI_MODEL          model (default gpt-4o-mini)
+  SAL_CONFIG                        configuration file path
+  SAL_SESSION_DIR                   session storage root
+  SAL_WEB_TOKEN                     access token for --web
   XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME   base directories
 
 examples:
-  hal                                   start the interactive UI
-  hal "list the go files in this repo"  interactive with an initial prompt
-  hal -p "summarize README.md"          one-shot
-  cat main.go | hal -p "review this"    pipe into a one-shot run
-  hal -p @notes.md "extract the todos"  include a file
-  hal --tools read,grep,find,ls -p "audit this repo"   read-only run
-  hal -c                                resume the last session
-  hal --continue-all                    resume the last session for the machine
-  hal --web                             serve the console in a browser
+  sal                                   start the interactive UI
+  sal "list the go files in this repo"  interactive with an initial prompt
+  sal -p "summarize README.md"          one-shot
+  cat main.go | sal -p "review this"    pipe into a one-shot run
+  sal -p @notes.md "extract the todos"  include a file
+  sal --tools read,grep,find,ls -p "audit this repo"   read-only run
+  sal -c                                resume the last session
+  sal --continue-all                    resume the last session for the machine
+  sal --web                             serve the console in a browser
 `
 }

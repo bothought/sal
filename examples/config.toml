@@ -1,12 +1,12 @@
-# hal configuration — every available key, fully populated.
+# sal configuration — every available key, fully populated.
 #
-# Location: $XDG_CONFIG_HOME/hal/config.toml   (default ~/.config/hal/config.toml)
+# Location: $XDG_CONFIG_HOME/sal/config.toml   (default ~/.config/sal/config.toml)
 # JSON is also accepted as config.json in the same directory; TOML wins if both exist.
 #
 # Precedence per setting: command-line flag > environment variable > this file > default.
 # See what actually applies, and where it came from, with:
 #
-#     hal --show-config
+#     sal --show-config
 
 # --- provider ---------------------------------------------------------------
 
@@ -25,8 +25,8 @@ model = "gpt-4o-mini"
 #   vLLM        http://127.0.0.1:8000/v1
 base_url = "https://api.openai.com/v1"
 
-# Leave empty and export HAL_API_KEY (or OPENAI_API_KEY) instead, so credentials
-# stay out of dotfiles. If this file does hold a key, keep it mode 600: hal warns
+# Leave empty and export SAL_API_KEY (or OPENAI_API_KEY) instead, so credentials
+# stay out of dotfiles. If this file does hold a key, keep it mode 600: sal warns
 # when it is readable by other users.
 api_key = ""
 # Or name the environment variable holding the key, so the secret stays in one
@@ -58,7 +58,7 @@ append_system_prompt = "Prefer small, focused changes and run the tests before f
 
 # --- sessions ---------------------------------------------------------------
 
-# Overrides the session store. Default: $XDG_DATA_HOME/hal/sessions
+# Overrides the session store. Default: $XDG_DATA_HOME/sal/sessions
 # A leading ~ is expanded.
 session_dir = ""
 
