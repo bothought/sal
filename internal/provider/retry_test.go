@@ -386,3 +386,58 @@ func TestModelSwitchForgetsTheCachedWindow(t *testing.T) {
 		t.Fatal("switching models should forget the cached window")
 	}
 }
+
+// TestContextWindowFromLimitObject covers the catalogue form a gateway such as
+// opencode.ai answers with, {"limit":{"context":N,"output":N}}, which nests the
+// figure one level away from context_length.
+func TestContextWindowFromLimitObject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"object":"list","data":[`+
+			`{"id":"other","limit":{"context":200000,"output":8192}},`+
+			`{"id":"m","context_length":0,"limit":{"context":1000000,"output":384000}}]}`)
+	}))
+	defer srv.Close()
+
+	o := NewFromEnv("k", srv.URL, "m")
+	got, ok := o.ContextWindow(context.Background())
+	if !ok || got != 1000000 {
+		t.Fatalf("window = %d %v, want 1000000", got, ok)
+	}
+}
+
+// TestContextWindowSurvivesALongCatalogue guards the size of the metadata read:
+// a catalogue bigger than a failure-message body must still decode, because a
+// truncated body is indistinguishable from "no limit published" and would drop
+// resolution to the built-in table.
+func TestContextWindowSurvivesALongCatalogue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		var b strings.Builder
+		b.WriteString(`{"object":"list","data":[`)
+		// Roughly 32 KiB of unrelated models, then the one asked for: enough to
+		// overflow maxErrorBody but not a real catalogue.
+		for i := 0; i < 200; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"id":"filler-%03d","object":"model","owned_by":"gateway",`+
+				`"description":"%s","limit":{"context":128000,"output":8192}}`, i, strings.Repeat("x", 100))
+		}
+		b.WriteString(`,{"id":"m","limit":{"context":1000000}}]}`)
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer srv.Close()
+
+	o := NewFromEnv("k", srv.URL, "m")
+	got, ok := o.ContextWindow(context.Background())
+	if !ok || got != 1000000 {
+		t.Fatalf("window = %d %v, want 1000000", got, ok)
+	}
+}

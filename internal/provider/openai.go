@@ -37,6 +37,11 @@ const (
 	HeaderTimeout = 60 * time.Second
 	// maxErrorBody caps how much of a failed response is read for the message.
 	maxErrorBody = 8192
+	// maxModelsBody caps the /models metadata read. It is much larger than a
+	// failure message: a gateway that serves the whole catalogue answers with
+	// dozens of models and their limits, and a truncated body does not decode,
+	// which would silently look like "no limit published".
+	maxModelsBody = 4 << 20
 	// maxIdleConnsPerHost keeps a gateway's connections warm, which matters for
 	// the retries above: a fresh connection to a flaky endpoint may reset again.
 	maxIdleConnsPerHost = 8
@@ -585,7 +590,7 @@ func (o *OpenAI) fetchContextWindow(ctx context.Context) (int, bool) {
 		return 0, false
 	}
 	var body modelsResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxErrorBody)).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxModelsBody)).Decode(&body); err != nil {
 		return 0, false
 	}
 	return body.limitFor(o.Model)
@@ -598,6 +603,12 @@ type modelsResponse struct {
 	Data []struct {
 		ID      string `json:"id"`
 		Context int    `json:"context_length"`
+		// The OpenAI-compatible catalogue form (opencode.ai among others):
+		// {"limit":{"context":N,"output":N}}.
+		Limit struct {
+			Context int `json:"context"`
+			Output  int `json:"output"`
+		} `json:"limit"`
 		// Nested forms: {"top_provider":{"context_length":N}} and
 		// {"limits":{"context":N}}.
 		TopProvider struct {
@@ -620,7 +631,7 @@ func (m modelsResponse) limitFor(model string) (int, bool) {
 		if d.ID != model {
 			continue
 		}
-		for _, n := range []int{d.Context, d.TopProvider.ContextLength, d.TopProvider.MaxInput, d.Limits.Context, d.Limits.MaxIn} {
+		for _, n := range []int{d.Context, d.Limit.Context, d.TopProvider.ContextLength, d.TopProvider.MaxInput, d.Limits.Context, d.Limits.MaxIn} {
 			if n > 0 {
 				return n, true
 			}

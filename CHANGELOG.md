@@ -54,6 +54,18 @@ All notable changes to this project are documented here. The format follows
   is bounded, which a whole-request timeout would have covered too.
 - The TUI session picker fits the terminal: entries are clipped and the list is
   windowed to the height, so a narrow or short terminal no longer overflows.
+- The context window published by a gateway is now found again. Two faults made
+  a real `1M` window fall back to the built-in table (and so to `65k` for a
+  `deepseek` model): the metadata read was capped at a failure message's 8 KiB,
+  which truncates a full model catalogue into unparseable JSON, and the
+  `{"limit":{"context":N}}` nesting that opencode.ai and other
+  OpenAI-compatible catalogues use was not read at all. `/context` now reports
+  the endpoint's own figure with `from the endpoint`.
+- The context window is now resolved at the start of a run, not only inside the
+  automatic-compaction check. That check returns early when `auto_compact` is
+  off, so a run with it disabled reported the built-in table's figure (and so
+  `65k` for a `deepseek` model) for the whole conversation, even though the
+  endpoint publishes the real one.
 - The web console reuses its access token from
   `$XDG_STATE_HOME/hal/web-token` (overridable with `--web-token` or
   `$HAL_WEB_TOKEN`), so a restarted process keeps serving a page that is already

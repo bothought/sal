@@ -27,3 +27,6 @@ Thumbs.db
 *.local.json
 .env
 .env.*
+
+# Local scratch space (ad-hoc servers, throwaway binaries)
+/.scratch/

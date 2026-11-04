@@ -418,8 +418,12 @@ func (a *Agent) RunPrompt(ctx context.Context, prompt string, emit func(Event)) 
 		msg := NewUserMessage(prompt)
 		a.append(msg, emit)
 	}
-	// Report the window before the first request, so the interface shows the
-	// figure even when the conversation has never been measured.
+	// Resolve the window now, while a context that can reach the endpoint is in
+	// hand, and only then report it. Asking here rather than leaving it to the
+	// compaction check is what makes the first figure the model's real one: the
+	// check returns early when auto-compaction is off, so a run with it disabled
+	// would otherwise report the table's guess for the whole conversation.
+	a.resolveLimit(ctx)
 	a.emitContext(emit)
 	if a.Provider == nil {
 		err := fmt.Errorf("no model provider configured: set HAL_API_KEY or OPENAI_API_KEY")

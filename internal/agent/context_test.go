@@ -618,3 +618,33 @@ func TestChunksNeverSplitAToolExchange(t *testing.T) {
 		t.Fatalf("the summarization should have been chunked, got %d calls", p.calls)
 	}
 }
+
+// TestRunResolvesTheWindowWithAutoCompactOff pins where the window gets
+// resolved: the compaction check returns early when automatic compaction is
+// off, so a run must ask the endpoint itself, or every figure it reports for
+// the conversation stays the built-in table's guess.
+func TestRunResolvesTheWindowWithAutoCompactOff(t *testing.T) {
+	p := &fakeProvider{answer: "hi", model: "deepseek-v4.1-flash", window: 1000000, hasWin: true}
+	a := New(p, nil, "/w", "")
+	a.AutoCompact = false
+	a.History = testHistory(1)
+
+	var limits []int
+	var sources []string
+	if err := a.RunPrompt(context.Background(), "", func(ev Event) {
+		if ev.Type == EventContext && ev.Context != nil {
+			limits = append(limits, ev.Context.Limit)
+			sources = append(sources, ev.Context.Source)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(limits) == 0 {
+		t.Fatal("the run reported no context")
+	}
+	for i := range limits {
+		if limits[i] != 1000000 || sources[i] != LimitFromProvider {
+			t.Fatalf("context %d = %d %s, want the endpoint's 1000000", i, limits[i], sources[i])
+		}
+	}
+}
