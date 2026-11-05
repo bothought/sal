@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-05
+
+### Fixed
+
+- **Trust the platform's certificate bundle.** With name resolution fixed in
+  0.1.3, reaching GitHub on Termux still failed because the TLS stack found no
+  CA bundle: Termux installs it under its own prefix. sal now trusts the
+  platform's bundle when no system bundle exists. A host that has one, or whose
+  `SSL_CERT_FILE` names one, is unaffected.
+
 ## [0.1.3] - 2026-11-05
 
 ### Fixed
@@ -18,11 +28,6 @@ All notable changes to this project are documented here. The format follows
   absent. Hosts that have `/etc/resolv.conf` are unaffected. A separate Android
   archive would not have fixed this: an ordinary Go toolchain has the same blind
   spot for both targets.
-- **TLS trust on Android/Termux.** Resolving names was only half of it: Termux
-  keeps its CA bundle under its own prefix, which the TLS stack does not read, so
-  the handshake failed with "certificate signed by unknown authority". Where no
-  system bundle exists, sal now trusts the platform's own bundle; a host with a
-  system bundle, or one whose `SSL_CERT_FILE` names a bundle, is unaffected.
 
 ## [0.1.2] - 2026-11-05
 
@@ -151,7 +156,8 @@ First release.
   `--append-system-prompt`, and per-conversation session headers for gateways
   that route agent traffic.
 
-[Unreleased]: https://github.com/bothought/sal/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/bothought/sal/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/bothought/sal/releases/tag/v0.1.4
 [0.1.3]: https://github.com/bothought/sal/releases/tag/v0.1.3
 [0.1.2]: https://github.com/bothought/sal/releases/tag/v0.1.2
 [0.1.1]: https://github.com/bothought/sal/releases/tag/v0.1.1
