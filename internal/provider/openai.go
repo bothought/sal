@@ -341,6 +341,11 @@ func isTransientNetError(err error) bool {
 	if errors.As(err, &oe) {
 		return true
 	}
+	// A keep-alive connection the server closed while it sat idle fails the
+	// next write with this; it is the same failure as a reset.
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
 	// The reset that motivated this shows up as a plain error string from the
 	// TLS/HTTP stack ("read: connection reset by peer"), so match on text too.
 	msg := strings.ToLower(err.Error())
@@ -351,6 +356,7 @@ func isTransientNetError(err error) bool {
 		"unexpected eof",
 		"eof",
 		"reset by peer",
+		"use of closed network connection",
 		"server closed idle connection",
 		"http2: server sent goaway",
 		"stream error",

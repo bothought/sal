@@ -38,7 +38,32 @@ git clone https://github.com/bothought/sal && cd sal && go build -o sal .
 ```
 
 Building needs Go 1.27.1 or newer (see `go.mod`); `go build` produces a single
-static binary with no runtime dependencies.
+static binary with no runtime dependencies. Release binaries for Linux, macOS
+and Windows (amd64 and arm64) are attached to each
+[release](https://github.com/bothought/sal/releases).
+
+### Upgrading
+
+An installed release binary can replace itself:
+
+```bash
+sal upgrade --check   # is there a newer release? changes nothing
+sal upgrade           # download, verify and install it
+```
+
+`sal upgrade` takes the latest non-prerelease release, chooses the archive for
+this machine (Termux uses the `linux/arm64` one), checks it against the
+release's SHA-256 list, runs it once to confirm it reports the release version,
+and only then puts it in place of the running binary. A failure at any step
+leaves the installed binary untouched. Packages, sessions and configuration are
+not touched; a symbolic link on `PATH` is preserved.
+
+The command needs no API key, no configuration file and no terminal, and it
+never downgrades or installs a prerelease. The first word `upgrade` is reserved,
+so a prompt that begins with it is written `sal -- upgrade ...`.
+
+A binary installed with `go install` is replaced too, but the module cache is
+not: keep using `go install github.com/bothought/sal@latest` for those.
 
 ## Configure
 
@@ -428,6 +453,9 @@ Deliberate, given "basic functions only":
   table for model windows rather than a vendor matrix.
 - `grep` uses Go's `regexp` rather than ripgrep, and neither search tool reads
   `.gitignore`.
+- `sal upgrade` verifies the release's checksums but not a signature, and it
+  only installs the latest release: no downgrade, no pinned or prerelease
+  version. It replaces the binary and nothing else.
 
 ## License
 

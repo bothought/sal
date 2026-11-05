@@ -15,6 +15,7 @@ design/
   features/                  what sal does
     basic-functions/         the current feature set, coarse to fine
     context-management/      the context indicator and compaction
+    self-upgrade/            sal downloading and replacing its own binary
   technical/                 how sal is built
     architecture/            the current technical architecture
     context-compaction/      the technical design of context-management
@@ -74,6 +75,7 @@ The two kinds are written at deliberately different depths:
 |---|---|
 | [basic-functions](features/basic-functions/README.md) | Everything sal currently does: the agent loop, the tools, the four interfaces, sessions, configuration, and the guardrails around them. |
 | [context-management](features/context-management/README.md) | The context window: a `used / limit` indicator, and compaction of older messages, automatic when the window fills or on `/compact`. |
+| [self-upgrade](features/self-upgrade/README.md) | `sal upgrade` and `sal upgrade --check`: replacing the installed binary with the latest GitHub release, and reporting whether one exists. |
 
 ### Technical
 
@@ -81,6 +83,7 @@ The two kinds are written at deliberately different depths:
 |---|---|
 | [architecture](technical/architecture/README.md) | Package layout, the responsibility of each part and the interfaces between them, the data formats, the concurrency model, and the testing strategy. |
 | [context-compaction](technical/context-compaction/README.md) | The technical design of `features/context-management`: where the policy lives, how the four modes share it, what flows between the loop, the session and the front ends, and which invariants the structure guarantees. |
+| [self-upgrade](technical/self-upgrade/README.md) | The technical design of `features/self-upgrade`: release discovery, asset selection and verification, platform replacement, the release pipeline, and the invariants that keep a failed upgrade inert. |
 
 The index lists every item, written or not. An item whose document does not
 exist yet is marked *(not written yet)*, so a gap is visible rather than silently
