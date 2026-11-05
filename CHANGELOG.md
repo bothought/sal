@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-05
+
 ### Fixed
 
 - **Name resolution on Android/Termux.** Android serves DNS through a system
@@ -16,6 +18,18 @@ All notable changes to this project are documented here. The format follows
   absent. Hosts that have `/etc/resolv.conf` are unaffected. A separate Android
   archive would not have fixed this: an ordinary Go toolchain has the same blind
   spot for both targets.
+
+## [0.1.2] - 2026-11-05
+
+### Fixed
+
+- **Android/Termux gets its own release asset.** 0.1.1 published
+  `sal_0.1.1_linux_arm64.tar.gz` as the Termux build, and installing it left the
+  binary unable to resolve any name. This release added a separate
+  `sal_<version>_android_arm64.tar.gz` on the theory that the Android build
+  reads a different resolver file. That theory was wrong for a release built on
+  an ordinary machine: both targets read `/etc/resolv.conf`, which Android does
+  not write. See 0.1.3 for the fix that works.
 
 ## [0.1.1] - 2026-11-05
 
@@ -132,6 +146,8 @@ First release.
   `--append-system-prompt`, and per-conversation session headers for gateways
   that route agent traffic.
 
-[Unreleased]: https://github.com/bothought/sal/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/bothought/sal/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/bothought/sal/releases/tag/v0.1.3
+[0.1.2]: https://github.com/bothought/sal/releases/tag/v0.1.2
 [0.1.1]: https://github.com/bothought/sal/releases/tag/v0.1.1
 [0.1.0]: https://github.com/bothought/sal/releases/tag/v0.1.0
