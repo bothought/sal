@@ -158,6 +158,24 @@ assets follow that naming is usable by any installed version that knows the
 platform rule. A machine whose platform has no asset in the release is told so
 by name (`no release asset for plan9/arm64`) and nothing is downloaded.
 
+### 3.7.1 Termux, and why the Linux archive still works there
+
+Android serves DNS through `netd` and does not write `/etc/resolv.conf`, so a
+binary that looks only at that file resolves nothing on a Termux device — and
+that includes the very request an upgrade needs. Termux keeps its resolver
+configuration at `$PREFIX/etc/resolv.conf` instead.
+
+Both ways of building sal for Termux therefore have the same problem: the
+standard Go resolver reads `/etc/resolv.conf` and nothing else, so neither the
+Linux nor the Android build of sal can look up a name there on its own. sal
+therefore finds its own name server when the system file is missing, before
+any request is made. An upgrade on Android is what that makes work: the
+downloaded archive is started by the version check and reaches the release
+once more on the next run.
+
+A machine that has `/etc/resolv.conf` is unaffected: the file is used as usual,
+and the fallback never runs.
+
 ### 3.8 What is checked before the binary is replaced
 
 An upgrade is a sequence of checks, and any of them failing stops the upgrade

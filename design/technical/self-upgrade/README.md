@@ -93,6 +93,9 @@ pipeline uses. Two properties matter:
   archive; an unknown platform produces a named error instead of a guess. A
   wrong guess would download a binary that cannot run, and the whole point of the
   test run is to catch that before it lands — so the guess is not made at all.
+  Mapping Android onto Linux is safe only because of the resolver fallback
+  described below: the archive runs there, and what would otherwise break is
+  name resolution rather than execution.
 - **Matching is by suffix, not by an exact assembled name**, so a release that
   changes the arrangement of the name around the platform does not break
   installed copies. It must still match exactly one asset and a checksum entry;
@@ -122,6 +125,29 @@ execution in the feature, documented rather than hidden.
 All temporary state is created next to the target and removed on every exit
 path, including a cancellation. Cleanup is unconditional; it never masks the
 error that caused it.
+
+### 4.1 Name resolution where the system file is absent
+
+The standard library's resolver reads one path, `/etc/resolv.conf`, and Android
+does not write it: DNS there is served by a system daemon, and Termux keeps the
+configuration under its own prefix. A program built for Android with the
+standard toolchain has the same blind spot as one built for Linux, so shipping a
+separate Android archive would not fix it — the difference between the two is in
+how the Termux toolchain is patched, which a release built on a normal machine
+does not inherit.
+
+The upgrade part therefore carries the bridge: when the system resolver file is
+missing, it reads the name servers from the alternate location and gives the
+HTTP client a resolver that asks them. This is confined to the client the
+upgrade creates — it is not a global resolver change, and it never runs when the
+system file exists. It is the only place in the program that knows about a
+platform's DNS layout, and it exists because a self-upgrade has to reach the
+network before it can install anything that might fix a platform quirk.
+
+The same reasoning applies to the provider's client, which is why the fallback
+belongs to a shared helper rather than to the upgrade alone: an agent that cannot
+resolve a name is not useful on the device either. How the helper is wired into
+each client is the code's business.
 
 ## 5. Platform replacement
 
