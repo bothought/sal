@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -30,10 +31,90 @@ import (
 	"github.com/bothought/sal/internal/session"
 	"github.com/bothought/sal/internal/tools"
 	"github.com/bothought/sal/internal/tui"
+	"github.com/bothought/sal/internal/upgrade"
 	"github.com/bothought/sal/internal/web"
 )
 
-const version = "0.1.0"
+// version is the version this binary reports. A release build injects the tag
+// (go build -ldflags "-X main.version=1.2.3"); an installed module build falls
+// back to the module version; everything else is a development build.
+var version = buildVersion()
+
+// injectedVersion is set at link time by the release pipeline. It is a separate
+// variable so that a plain `go build` still falls through to the build
+// information instead of claiming a release version.
+var injectedVersion = ""
+
+// upgradeAPIBase is the release endpoint `sal upgrade` talks to. It is a
+// variable so a test can point the command at a local server.
+var upgradeAPIBase = upgrade.DefaultAPIBase
+
+// buildVersion resolves the version in that order. A version the toolchain
+// derives from a checkout is a pseudo-version, not a release, so it reports the
+// development marker like any other build that was not made from a release.
+func buildVersion() string {
+	if v := injectedVersion; v != "" {
+		return strings.TrimPrefix(v, "v")
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v := bi.Main.Version; v != "" && v != "(devel)" && !isPseudoVersion(v) {
+			return strings.TrimPrefix(v, "v")
+		}
+	}
+	return "dev"
+}
+
+// isPseudoVersion reports whether v is a version the Go toolchain synthesised
+// from a VCS revision ("v0.1.1-0.20260101000000-abcdef123456", optionally
+// marked dirty). Such a version describes a checkout, not a published release,
+// and must not be ordered against one.
+func isPseudoVersion(v string) bool {
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	i := strings.IndexByte(v, '-')
+	if i < 0 {
+		return false
+	}
+	// A pseudo-version ends in "-<14-digit timestamp>-<12-hex revision>".
+	pre := v[i+1:]
+	j := strings.LastIndexByte(pre, '-')
+	if j < 0 || !isHex(pre[j+1:]) {
+		return false
+	}
+	parts := strings.Split(pre[:j], ".")
+	stamp := parts[len(parts)-1]
+	if !isDigits(stamp) || len(stamp) != 14 {
+		return false
+	}
+	// The ".0" before the timestamp separates it from a real prerelease.
+	return len(parts) == 1 || parts[len(parts)-2] == "0"
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 type options struct {
 	printMode     bool
@@ -90,7 +171,14 @@ func (v *sizeValue) Set(s string) error {
 }
 
 func main() {
+	// A Windows upgrade cannot delete the binary it replaced until the process
+	// that ran it exits, so the leftovers are removed on the next start.
+	upgrade.CleanupStale()
 	if err := runWithArgs(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// -h/--help already printed the usage; asking for it is not a failure.
+			return
+		}
 		fmt.Fprintln(os.Stderr, "sal: "+err.Error())
 		os.Exit(1)
 	}
@@ -100,6 +188,9 @@ func run() error { return runWithArgs(os.Args[1:]) }
 
 // runWithArgs is the whole program, parameterized by argv so tests can drive it.
 func runWithArgs(args []string) error {
+	if handled, err := runSubcommand(args); handled {
+		return err
+	}
 	opts, setFlags, err := parseArgs(args)
 	if err != nil {
 		return err
@@ -283,6 +374,34 @@ func runWithArgs(args []string) error {
 	default:
 		return runPrint(ctx, ag, prompt, os.Stdout, os.Stderr)
 	}
+}
+
+// runSubcommand handles a reserved first word. It runs before the configuration
+// file is loaded, so a subcommand needs no settings, no credentials and no
+// terminal; the second result reports whether the word was ours.
+func runSubcommand(args []string) (bool, error) {
+	if len(args) == 0 || args[0] != "upgrade" {
+		return false, nil
+	}
+	fs := flag.NewFlagSet("sal upgrade", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, upgradeUsageText()) }
+	check := fs.Bool("check", false, "report whether a newer release exists, without installing it")
+	if err := fs.Parse(args[1:]); err != nil {
+		return true, err
+	}
+	if fs.NArg() > 0 {
+		return true, fmt.Errorf("upgrade takes no arguments (got %q)", fs.Arg(0))
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return true, upgrade.Run(ctx, upgrade.Options{
+		Version: version,
+		APIBase: upgradeAPIBase,
+		Out:     os.Stdout,
+		Check:   *check,
+	})
 }
 
 // parseArgs parses the command line. The returned set records which flags the
@@ -972,6 +1091,13 @@ func usageText() string {
 
 usage:
   sal [options] [--] [@files...] [messages...]
+  sal upgrade [--check]
+
+commands:
+  upgrade              replace this binary with the latest GitHub release
+  upgrade --check      report whether a newer release exists, change nothing
+                       (the word is reserved; write a prompt that begins with
+                       it as: sal -- upgrade ...)
 
 modes:
   (default)            interactive terminal UI
@@ -1062,5 +1188,33 @@ examples:
   sal -c                                resume the last session
   sal --continue-all                    resume the last session for the machine
   sal --web                             serve the console in a browser
+  sal upgrade --check                   is there a newer release?
+  sal upgrade                           install the latest release
+`
+}
+
+// upgradeUsageText is the subcommand's own help, available without a
+// configuration file or a network connection.
+func upgradeUsageText() string {
+	return `sal upgrade — replace this binary with the latest GitHub release
+
+usage:
+  sal upgrade [--check]
+
+options:
+  --check      report the installed and latest versions and whether an update
+               exists; writes nothing and installs nothing
+  -h, --help   show this help
+
+The archive for this machine is downloaded from the latest non-draft,
+non-prerelease release, checked against the release's SHA-256 checksums, run
+once to confirm it reports the release version, and only then put in place of
+the running binary. A failure leaves the installed binary unchanged.
+
+Releases come from https://github.com/` + upgrade.RepoOwner + `/` + upgrade.RepoName + `. The
+command needs no API key, no configuration file and no terminal. There is no
+way to downgrade or to pick a specific release.
+
+A prompt that begins with the word "upgrade" is written: sal -- upgrade ...
 `
 }
