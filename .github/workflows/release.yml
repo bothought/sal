@@ -1,0 +1,77 @@
+name: Release
+
+# Tagging a version publishes the binaries `sal upgrade` installs. Every
+# platform in the upgrade table must be built here, or an installed copy on that
+# platform could never be updated.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test before releasing
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build
+        env:
+          # The tag is the version the binary reports and the version
+          # `sal upgrade` compares against.
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -eu
+          version="${VERSION#v}"
+          mkdir -p dist
+          for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os="${pair%/*}"
+            arch="${pair#*/}"
+            name="sal_${version}_${os}_${arch}"
+            out="sal"
+            [ "$os" = windows ] && out="sal.exe"
+            echo "building $name"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w -X main.injectedVersion=${version}" -o "dist/$out" .
+            if [ "$os" = windows ]; then
+              (cd dist && zip -q "$name.zip" "$out" && rm "$out")
+            else
+              tar -C dist -czf "dist/$name.tar.gz" "$out" && rm "dist/$out"
+            fi
+          done
+
+          # The checksum file is not optional: `sal upgrade` refuses a release
+          # that does not carry one.
+          (cd dist && sha256sum sal_*.tar.gz sal_*.zip > sal_${version}_checksums.txt)
+          cat "dist/sal_${version}_checksums.txt"
+
+      - name: Verify the version injection
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          CGO_ENABLED=0 go build -trimpath -ldflags "-X main.injectedVersion=${version}" -o /tmp/sal-check .
+          got="$(/tmp/sal-check --version)"
+          echo "$got"
+          test "$got" = "sal ${version}"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "sal $version" \
+            --generate-notes

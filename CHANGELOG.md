@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`sal upgrade`.** The binary can replace itself with the latest GitHub
+  release: the archive for the machine is downloaded, checked against the
+  release's SHA-256 list, run once to confirm it reports the release version,
+  and then renamed over the running binary, which is atomic on Unix and a
+  rename-aside on Windows. `sal upgrade --check` reports the installed and
+  latest versions and writes nothing. The 0.1.0 release has no assets, so this
+  feature becomes usable with the next tagged release, which is built for
+  Linux, macOS and Windows on amd64 and arm64 by the new release workflow.
+  Versions are no longer a hard-coded constant: a release build injects its tag,
+  a `go install` build uses the recorded module version, and any other build
+  reports `dev`.
+
 - **Context window tracking and compaction.** The terminal footer and the web
   console now show `ctx used/limit percent` for the next request, distinct from
   the cumulative `↑`/`↓` counters. The figure is measured from the token counts

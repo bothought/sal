@@ -29,3 +29,14 @@ jobs:
         run: go test ./...
       - name: Test with the race detector
         run: go test -race ./...
+      # `sal upgrade` picks an asset per platform and has one source file per
+      # operating system, so every platform the release builds for must at
+      # least compile here.
+      - name: Cross-compile the release targets
+        run: |
+          set -eu
+          for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os="${pair%/*}"; arch="${pair#*/}"
+            echo "building $os/$arch"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o /dev/null .
+          done
