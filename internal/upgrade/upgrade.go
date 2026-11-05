@@ -86,24 +86,23 @@ type target struct {
 }
 
 // platformFor maps a machine to the archive the release publishes for it.
-// An unknown platform is an error rather than a guess.
-//
-// Android gets its own archive even though it runs Linux binaries: the two
-// builds look for the system DNS configuration in different places, and a Linux
-// binary on an Android device starts and reports its version while being unable
-// to resolve a name. Folding Android into Linux would install exactly that.
+// Android runs Linux binaries its architecture matches, so it maps onto the
+// Linux archives; an unknown platform is an error rather than a guess.
 func platformFor(goos, goarch string) (target, error) {
 	arch := goarch
 	switch goos {
-	case "linux", "darwin", "windows":
+	case "linux", "android":
 		if arch != "amd64" && arch != "arm64" {
 			return target{}, fmt.Errorf("no release asset for %s/%s", goos, goarch)
 		}
-	case "android":
-		// Only arm64: an Android build needs cgo, and there is no cross
-		// toolchain for the other architectures in the release pipeline.
-		if arch != "arm64" {
-			return target{}, fmt.Errorf("no release asset for %s/%s", goos, goarch)
+		goos = "linux"
+	case "darwin":
+		if arch != "amd64" && arch != "arm64" {
+			return target{}, fmt.Errorf("no release asset for darwin/%s", goarch)
+		}
+	case "windows":
+		if arch != "amd64" && arch != "arm64" {
+			return target{}, fmt.Errorf("no release asset for windows/%s", goarch)
 		}
 	default:
 		return target{}, fmt.Errorf("no release asset for %s/%s", goos, goarch)

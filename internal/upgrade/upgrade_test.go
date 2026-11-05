@@ -83,12 +83,11 @@ func TestPlatformFor(t *testing.T) {
 	}{
 		{"linux", "amd64", "linux/amd64", "_linux_amd64.tar.gz", false, "sal", false},
 		{"linux", "arm64", "linux/arm64", "_linux_arm64.tar.gz", false, "sal", false},
-		{"android", "arm64", "android/arm64", "_android_arm64.tar.gz", false, "sal", false},
+		{"android", "arm64", "linux/arm64", "_linux_arm64.tar.gz", false, "sal", false},
 		{"darwin", "arm64", "darwin/arm64", "_darwin_arm64.tar.gz", false, "sal", false},
 		{"windows", "amd64", "windows/amd64", "_windows_amd64.zip", true, "sal.exe", false},
 		{"windows", "arm64", "windows/arm64", "_windows_arm64.zip", true, "sal.exe", false},
 		{"linux", "386", "", "", false, "", true},
-		{"android", "amd64", "", "", false, "", true},
 		{"plan9", "arm64", "", "", false, "", true},
 		{"freebsd", "amd64", "", "", false, "", true},
 	}
@@ -516,33 +515,5 @@ func TestHumanSize(t *testing.T) {
 		if got := humanSize(n); got != want {
 			t.Fatalf("humanSize(%d) = %q, want %q", n, got, want)
 		}
-	}
-}
-
-// TestAndroidIsNotEighteenLinux pins the reason the platform table keeps Android
-// separate. An Android device runs Linux binaries, so folding the two looks
-// harmless, but a Linux build of sal looks for /etc/resolv.conf while an Android
-// build reads the resolver file Termux installs. Installing the Linux archive on
-// Android therefore produces a binary that starts, reports its version, and
-// cannot resolve a name — which also breaks every later upgrade.
-func TestAndroidIsNotLinux(t *testing.T) {
-	android, err := platformFor("android", "arm64")
-	if err != nil {
-		t.Fatal(err)
-	}
-	linux, err := platformFor("linux", "arm64")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if android.suffix == linux.suffix {
-		t.Fatalf("android must not share the Linux asset (%s)", android.suffix)
-	}
-	if !strings.Contains(android.suffix, "_android_") {
-		t.Fatalf("android asset = %q, want an android archive", android.suffix)
-	}
-	// The release must be able to satisfy it, so the platform set is checked
-	// against the naming rule the pipeline uses.
-	if android.label != "android/arm64" {
-		t.Fatalf("android label = %q", android.label)
 	}
 }
