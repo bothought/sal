@@ -3,6 +3,8 @@ package upgrade
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"os"
@@ -61,6 +63,50 @@ func findNameserver() string {
 	return ""
 }
 
+// systemCertFiles are the bundles the Go TLS stack reads on its own.
+var systemCertFiles = []string{
+	"/etc/ssl/certs/ca-certificates.crt",
+	"/etc/pki/tls/certs/ca-bundle.crt",
+	"/etc/ssl/ca-bundle.pem",
+	"/etc/pki/tls/cacert.pem",
+	"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+	"/etc/ssl/cert.pem",
+}
+
+// alternateCertFiles are searched when no system bundle exists. Termux installs
+// its certificates under its own prefix, which the Go TLS stack does not read;
+// without this a sal built on an ordinary machine cannot complete a handshake
+// with anything there.
+var alternateCertFiles = []string{
+	"/data/data/com.termux/files/usr/etc/tls/cert.pem",
+}
+
+// rootCAs returns the certificate pool to trust, or nil to use the system's.
+//
+// It only steps in when the system has no bundle at all, so an ordinary host
+// keeps the standard behaviour, including any bundle the environment names.
+func rootCAs() *x509.CertPool {
+	if os.Getenv("SSL_CERT_FILE") != "" {
+		return nil // the system already honors an explicit choice
+	}
+	for _, path := range systemCertFiles {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+	}
+	for _, path := range alternateCertFiles {
+		pem, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			continue
+		}
+		pool := x509.NewCertPool()
+		if pool.AppendCertsFromPEM(pem) {
+			return pool
+		}
+	}
+	return nil
+}
+
 // nameserverIn parses the first nameserver line of a resolver configuration.
 func nameserverIn(path string) string {
 	f, err := os.Open(filepath.Clean(path))
@@ -69,6 +115,9 @@ func nameserverIn(path string) string {
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
+	// A comments line can be long; the default 64 KiB would stop at it and
+	// quietly ignore every nameserver after it.
+	sc.Buffer(make([]byte, 0, 4096), 1<<20)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
@@ -87,10 +136,11 @@ func nameserverIn(path string) string {
 }
 
 // newHTTPClient is the client an upgrade uses. It resolves names through the
-// dialer above, and it has no overall timeout: the run is bounded by its
-// context and by the download limit instead.
+// dialer above, trusts the platform's certificate bundle when the system one is
+// missing, and has no overall timeout: the run is bounded by its context and by
+// the download limit instead.
 func newHTTPClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{
+	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           newDialer(30*time.Second, 30*time.Second).DialContext,
 		ForceAttemptHTTP2:     true,
@@ -98,5 +148,9 @@ func newHTTPClient() *http.Client {
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ExpectContinueTimeout: time.Second,
-	}}
+	}
+	if pool := rootCAs(); pool != nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+	}
+	return &http.Client{Transport: transport}
 }

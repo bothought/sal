@@ -18,6 +18,11 @@ All notable changes to this project are documented here. The format follows
   absent. Hosts that have `/etc/resolv.conf` are unaffected. A separate Android
   archive would not have fixed this: an ordinary Go toolchain has the same blind
   spot for both targets.
+- **TLS trust on Android/Termux.** Resolving names was only half of it: Termux
+  keeps its CA bundle under its own prefix, which the TLS stack does not read, so
+  the handshake failed with "certificate signed by unknown authority". Where no
+  system bundle exists, sal now trusts the platform's own bundle; a host with a
+  system bundle, or one whose `SSL_CERT_FILE` names a bundle, is unaffected.
 
 ## [0.1.2] - 2026-11-05
 

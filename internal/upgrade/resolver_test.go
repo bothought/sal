@@ -3,6 +3,7 @@ package upgrade
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +43,36 @@ func TestNoFallbackWhenTheSystemFileExists(t *testing.T) {
 	}
 	if got := findNameserver(); got != "" {
 		t.Fatalf("findNameserver = %q on a host with %s; the fallback must not run", got, systemResolverFile)
+	}
+}
+
+// TestRootCAsOnlyStepsInWhenTheSystemHasNone pins that the certificate
+// workaround is inert on an ordinary host, and that an explicit bundle wins.
+func TestRootCAsOnlyStepsInWhenTheSystemHasNone(t *testing.T) {
+	if os.Getenv("SSL_CERT_FILE") != "" {
+		t.Skip("the environment names a bundle; the system choice must win")
+	}
+	system := false
+	for _, p := range systemCertFiles {
+		if _, err := os.Stat(p); err == nil {
+			system = true
+			break
+		}
+	}
+	got := rootCAs()
+	if system && got != nil {
+		t.Fatalf("rootCAs returned a pool on a host with a system bundle; the workaround must not run")
+	}
+	if !system && got == nil {
+		t.Skip("this host has neither a system bundle nor an alternate one")
+	}
+}
+
+// TestNameserverInIsBounded keeps a hostile resolver file from being read
+// forever; a nameserver line is short by definition.
+func TestNameserverInIsBounded(t *testing.T) {
+	long := "nameserver " + strings.Repeat("9", 100000) + "\nnameserver 1.1.1.1\n"
+	if got := nameserverIn(writeResolv(t, long)); got != "1.1.1.1:53" {
+		t.Fatalf("a malformed long line must be skipped, got %q", got)
 	}
 }
