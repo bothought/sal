@@ -173,8 +173,11 @@ any request is made. An upgrade on Android is what that makes work: the
 downloaded archive is started by the version check and reaches the release
 once more on the next run.
 
-A machine that has `/etc/resolv.conf` is unaffected: the file is used as usual,
-and the fallback never runs.
+The same is true of certificates: Termux keeps its CA bundle under its own
+prefix, and the TLS stack looks only at the usual system locations. Where no
+system bundle exists, sal trusts the platform's own bundle. A machine with a
+system bundle, or one whose environment names a bundle explicitly, is
+unaffected: the fallback never runs there.
 
 ### 3.8 What is checked before the binary is replaced
 

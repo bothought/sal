@@ -144,10 +144,16 @@ system file exists. It is the only place in the program that knows about a
 platform's DNS layout, and it exists because a self-upgrade has to reach the
 network before it can install anything that might fix a platform quirk.
 
+The trust store has the same shape of problem and the same answer: the TLS stack
+reads the usual system locations, and Termux installs its bundle under its own
+prefix. The client therefore falls back to the platform bundle when no system
+bundle exists — and only then, so an ordinary host, and one whose environment
+names a bundle, keeps the standard behaviour.
+
 The same reasoning applies to the provider's client, which is why the fallback
 belongs to a shared helper rather than to the upgrade alone: an agent that cannot
-resolve a name is not useful on the device either. How the helper is wired into
-each client is the code's business.
+resolve a name, or cannot complete a handshake, is not useful on the device
+either. How the helper is wired into each client is the code's business.
 
 ## 5. Platform replacement
 
