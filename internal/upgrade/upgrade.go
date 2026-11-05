@@ -142,7 +142,7 @@ func Run(ctx context.Context, opts Options) error {
 	if o.HTTPClient != nil {
 		o.client = o.HTTPClient
 	} else {
-		o.client = &http.Client{}
+		o.client = newHTTPClient()
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, o.Timeout)

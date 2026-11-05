@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Name resolution on Android/Termux.** Android serves DNS through a system
+  daemon and does not write `/etc/resolv.conf`, which is the only path the Go
+  resolver reads, so a sal built on a normal machine could not resolve a name on
+  a Termux device — including the request `sal upgrade` has to make. sal now
+  reads the name servers from Termux's own resolver file when the system file is
+  absent. Hosts that have `/etc/resolv.conf` are unaffected. A separate Android
+  archive would not have fixed this: an ordinary Go toolchain has the same blind
+  spot for both targets.
+
 ## [0.1.1] - 2026-11-05
 
 This is the first release with published binaries, so it is the first one
