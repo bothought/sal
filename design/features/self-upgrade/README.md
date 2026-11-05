@@ -123,7 +123,8 @@ The installed version is the one `sal --version` prints:
 - a binary installed with `go install ...@latest` reports the module version the
   Go toolchain recorded;
 - any other build (a checkout built with `go build`, a local development build)
-  reports `dev`.
+  reports `dev`, including a build whose version the toolchain derived from a
+  checkout rather than from a published release.
 
 `dev` cannot be ordered against a release, so `--check` reports the latest
 release and says `installed version 'dev' cannot be compared; run 'sal upgrade'

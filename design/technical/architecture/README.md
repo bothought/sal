@@ -25,6 +25,7 @@ internal/session        JSONL session storage
 internal/tui            terminal UI
 internal/web            HTTP + SSE console, with its page embedded
 internal/config         config file and XDG path resolution
+internal/upgrade        replacing the binary with a newer release
 ```
 
 Dependency direction is a straight line with the agent at the centre:
@@ -36,7 +37,8 @@ main ──▶ agent ◀── provider
   ├──▶ session ──▶ agent, config
   ├──▶ tui  ──▶ agent, session
   ├──▶ web  ──▶ agent, session
-  └──▶ config
+  ├──▶ config
+  └──▶ upgrade   (independent of everything else)
 ```
 
 The agent knows nothing about the other packages. It defines the neutral types

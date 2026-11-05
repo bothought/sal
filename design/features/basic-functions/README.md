@@ -386,8 +386,9 @@ appended:
 
 ## 7. Documentation and developer-facing behaviour
 
-- `--help` prints usage, the modes, every flag, the config-file keys, the
-  environment variables, and examples.
+- `--help` prints usage, the modes, the commands, every flag, the config-file
+  keys, the environment variables, and examples. `sal upgrade` has its own
+  `--help`.
 - The README documents the same surface for users, and the CHANGELOG records
   notable changes per release.
 - The test suite covers the agent loop against a scripted SSE server and the
@@ -414,6 +415,9 @@ Not implemented, deliberately, and not to be added without a design change:
   through a compatible gateway.
 - Extensions, skills, prompt templates, packages, themes, sub-agents, MCP, plan
   mode, background bash.
+- Upgrading from inside sal's interfaces: `sal upgrade` is a command of its own,
+  specified in `design/features/self-upgrade`, and it is not a tool, a slash
+  command or an event.
 - Session-tree navigation (`/tree`, `/fork`, `/clone`) or HTML export. Sessions
   are linear and resumable only. (Compaction is not an exception to this: it
   changes what the model is sent, not the session tree, and the log stays
