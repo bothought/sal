@@ -92,8 +92,7 @@ The second line of the last line is intentional: the process that performed the
 upgrade keeps running the old binary, and only a new process uses the new one.
 
 - The platform fragment is the one the asset was chosen for (`linux/arm64`,
-  `darwin/arm64`, `windows/amd64`), not necessarily the machine's raw
-  `GOOS`/`GOARCH`; see §3.7.
+  `darwin/arm64`, `windows/amd64`, `android/arm64`); see §3.7.
 - When there is nothing to do, the output is the same three lines as
   `--check` and the exit status is 0.
 - The command does not ask for confirmation. Typing `sal upgrade` is the
@@ -151,7 +150,15 @@ The release carries one archive per operating system and architecture:
 | Linux `amd64`, `arm64` | `sal_<version>_linux_<arch>.tar.gz` |
 | macOS `amd64`, `arm64` | `sal_<version>_darwin_<arch>.tar.gz` |
 | Windows `amd64`, `arm64` | `sal_<version>_windows_<arch>.zip` |
-| Android/Termux `arm64` | the `linux/arm64` archive |
+| Android/Termux `arm64` | `sal_<version>_android_<arch>.tar.gz` |
+
+Android gets an archive of its own rather than the Linux one, even though the
+same machine runs Linux binaries. The two differ in how the program finds the
+system's DNS configuration: an Android build reads the resolver file Termux
+installs, and a Linux build reads `/etc/resolv.conf`, which does not exist
+there. A Linux binary therefore starts and reports its version on an Android
+device but cannot resolve a name, so installing one would leave the upgraded
+program unable to reach anything — including the next upgrade.
 
 The asset is chosen by matching the release's asset names, so a release whose
 assets follow that naming is usable by any installed version that knows the
