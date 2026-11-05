@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Android/Termux gets its own release asset.** 0.1.1 published
+  `sal_0.1.1_linux_arm64.tar.gz` as the Termux build, and installing it left the
+  binary unable to resolve any name: a Linux build of sal reads
+  `/etc/resolv.conf`, which Termux does not have, while an Android build reads
+  the resolver file Termux installs. The platform table now keeps Android
+  separate (`sal_<version>_android_arm64.tar.gz`, `arm64` only, because an
+  Android build needs cgo), so upgrading on Android no longer bricks networking
+  — including the networking the next upgrade needs. A release without the
+  Android asset now reports `no release asset for android/arm64` and changes
+  nothing. Anyone who installed 0.1.1 on Termux should reinstall by hand
+  (`go install` or the 0.1.2 archive); `sal upgrade` cannot help them there,
+  because the 0.1.1 binary cannot reach GitHub.
+
 ## [0.1.1] - 2026-11-05
 
 This is the first release with published binaries, so it is the first one

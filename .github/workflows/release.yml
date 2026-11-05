@@ -36,7 +36,10 @@ jobs:
           set -eu
           version="${VERSION#v}"
           mkdir -p dist
-          for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+          # Android is built separately from Linux on purpose: the two look for
+          # the system DNS configuration in different places, so the Linux
+          # binary cannot resolve a name on an Android device.
+          for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 android/arm64; do
             os="${pair%/*}"
             arch="${pair#*/}"
             name="sal_${version}_${os}_${arch}"

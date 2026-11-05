@@ -52,7 +52,8 @@ sal upgrade           # download, verify and install it
 ```
 
 `sal upgrade` takes the latest non-prerelease release, chooses the archive for
-this machine (Termux uses the `linux/arm64` one), checks it against the
+this machine (Termux uses the `android/arm64` one — not the Linux build, which
+cannot resolve names on Android), checks it against the
 release's SHA-256 list, runs it once to confirm it reports the release version,
 and only then puts it in place of the running binary. A failure at any step
 leaves the installed binary untouched. Packages, sessions and configuration are
