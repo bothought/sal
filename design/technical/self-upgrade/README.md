@@ -89,17 +89,10 @@ architecture, the release's asset names, and the naming rule the release
 pipeline uses. Two properties matter:
 
 - **The mapping is total or explicit.** Known platforms map to one archive form
-  (two names, one for each packaging format); an unknown platform produces a
-  named error instead of a guess.
-- **Android is not folded into Linux.** The two builds differ in where the
-  program looks for the system's DNS configuration, so a Linux binary on an
-  Android device starts but cannot resolve a name — a failure the test run
-  cannot see, because reporting the version needs no network. The platform
-  table therefore keeps Android separate and the release builds it separately.
-  Only Android `arm64` is published: an Android build needs cgo, and the
-  release pipeline has no cross toolchain for the other architectures.
-  A mapping that looks equivalent because the machine runs the other platform's
-  binaries is exactly the kind of guess this rule exists to prevent.
+  (two names, one for each packaging format); Android is mapped to the Linux
+  archive; an unknown platform produces a named error instead of a guess. A
+  wrong guess would download a binary that cannot run, and the whole point of the
+  test run is to catch that before it lands — so the guess is not made at all.
 - **Matching is by suffix, not by an exact assembled name**, so a release that
   changes the arrangement of the name around the platform does not break
   installed copies. It must still match exactly one asset and a checksum entry;
