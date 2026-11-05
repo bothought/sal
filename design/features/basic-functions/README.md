@@ -88,11 +88,13 @@ covers the summarization request.
 
 ### 2.6 Transient provider failures
 
-Connection resets (`read: connection reset by peer`), timeouts, and `429`/`5xx`
-responses are treated as transient and retried with exponential backoff — 0.5s,
-1s, 2s, 4s, capped at 10s, four attempts by default (`--max-retries` /
-`max_retries`; a negative value disables retrying, `0` means the default). A
-`Retry-After` header from the server wins over the computed backoff.
+Connection resets (`read: connection reset by peer`), a keep-alive connection
+the server closed while it sat idle (`use of closed network connection`),
+timeouts, and `429`/`5xx` responses are treated as transient and retried with
+exponential backoff — 0.5s, 1s, 2s, 4s, capped at 10s, four attempts by default
+(`--max-retries` / `max_retries`; a negative value disables retrying, `0` means
+the default). A `Retry-After` header from the server wins over the computed
+backoff.
 
 Retrying stops at the first failure that is not transient (a `400`, a bad
 response body), at a cancelled run, and after part of the answer has already been
