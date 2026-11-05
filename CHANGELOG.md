@@ -6,8 +6,6 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.2] - 2026-11-05
-
 ### Fixed
 
 - **Android/Termux gets its own release asset.** 0.1.1 published
@@ -138,7 +136,6 @@ First release.
   `--append-system-prompt`, and per-conversation session headers for gateways
   that route agent traffic.
 
-[Unreleased]: https://github.com/bothought/sal/compare/v0.1.2...HEAD
-[0.1.2]: https://github.com/bothought/sal/releases/tag/v0.1.2
+[Unreleased]: https://github.com/bothought/sal/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/bothought/sal/releases/tag/v0.1.1
 [0.1.0]: https://github.com/bothought/sal/releases/tag/v0.1.0
