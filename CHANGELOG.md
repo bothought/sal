@@ -59,6 +59,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A keep-alive connection the server closed while it sat idle is retried as a
+  transient failure instead of failing the turn. A POST cannot be replayed by
+  the transport, so reusing such a connection failed the write with
+  `use of closed network connection`, which the retry policy did not recognise
+  as a reset. Its end-to-end test asserted one particular wording, so it failed
+  whenever the connection pool produced the other one.
 - A dropped connection in the middle of a stream is no longer presented as an
   empty answer: an unfinished stream that delivered nothing is treated as a
   transient failure and retried.

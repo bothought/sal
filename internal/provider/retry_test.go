@@ -50,6 +50,11 @@ func TestConnectionResetIsTransient(t *testing.T) {
 	if !isTransientNetError(fmt.Errorf("wrapped: %w", io.ErrUnexpectedEOF)) {
 		t.Fatal("a wrapped unexpected EOF must be retried")
 	}
+	// A keep-alive connection the server closed while idle fails the next write
+	// this way; it must be retried like a reset.
+	if !isTransientNetError(fmt.Errorf("write tcp: %w", net.ErrClosed)) {
+		t.Fatal("a closed idle connection must be retried")
+	}
 }
 
 func TestTransientHTTPStatuses(t *testing.T) {
