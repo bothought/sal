@@ -1,0 +1,11 @@
+# Line endings are part of the content here, not a checkout detail.
+#
+# Without this, a Windows checkout rewrites every text file to CRLF (Git's
+# autocrlf default on the runners), which makes gofmt report every Go file as
+# unformatted and changes the bytes of test fixtures that compare text.
+* text=auto eol=lf
+
+# The release archives contain these; never let a checkout alter them.
+*.png binary
+*.gz binary
+*.zip binary

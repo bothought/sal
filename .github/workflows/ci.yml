@@ -31,8 +31,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Check formatting
+        # .gitattributes pins the line endings, so a Windows checkout has the
+        # same bytes as a Linux one and this check means the same thing there.
         run: test -z "$(gofmt -l .)"
-        shell: bash
       - name: Vet
         run: go vet ./...
       - name: Test

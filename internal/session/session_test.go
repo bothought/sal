@@ -471,3 +471,50 @@ func TestProjectDirIsValidOnEveryPlatform(t *testing.T) {
 		t.Fatalf("cannot create the project bucket %s: %v", dir, err)
 	}
 }
+
+// TestOneDirectoryIsOneBucketThroughASymlink covers the case macOS exposes: the
+// working directory can be spelled two ways, one through a symbolic link (a
+// temporary directory is /var/... but resolves to /private/var/...), and both
+// spellings must find the same sessions. Linux reaches a project behind a link
+// the same way.
+func TestOneDirectoryIsOneBucketThroughASymlink(t *testing.T) {
+	root := t.TempDir()
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+
+	if ProjectDir(root, real) != ProjectDir(root, link) {
+		t.Fatalf("the same directory produced two buckets:\n  %s\n  %s",
+			ProjectDir(root, real), ProjectDir(root, link))
+	}
+
+	sess, err := New(root, link, "through a link", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.AppendMessage(agent.NewUserMessage("hi"))
+	_ = sess.Close()
+
+	// Listing the physical spelling finds what was written through the link.
+	infos, err := List(root, real, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 || infos[0].ID != sess.ID {
+		t.Fatalf("the session was not found through the other spelling: %+v", infos)
+	}
+	// And its recorded cwd is the physical path, so the cross-bucket filter
+	// recognises it too.
+	if infos[0].Cwd != ProjectDir("", real) && filepath.Base(infos[0].Cwd) == "" {
+		t.Fatalf("recorded cwd = %q", infos[0].Cwd)
+	}
+	all, err := List(root, real, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("the machine-wide listing did not recognise the directory: %+v", all)
+	}
+}
