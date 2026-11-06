@@ -172,7 +172,11 @@ A session is an append-only JSONL file, and the format is the contract:
   process that dies mid-write leaves a file whose truncated last line is skipped
   when it is read back.
 - Files live under a per-project bucket derived from the absolute working
-  directory, so grouping survives a rename of anything but the directory.
+  directory, so grouping survives a rename of anything but the directory. The
+  derivation must produce a name the platform accepts as a directory: a Windows
+  drive path carries a colon, which the filesystem there rejects, so the
+  flattening is a platform-independent rule rather than a plain replacement of
+  separators.
 - Listing and lookup are the same query at different scopes: one project bucket,
   or every bucket filtered by the recorded working directory; the newest is
   picked by the newest entry timestamp with a deterministic tie-break, and a
@@ -308,7 +312,10 @@ The suite is layered, and the layers exist to keep the real loop under test:
 
 The same rules apply everywhere: no fixed temporary paths, no assumptions about
 the host shell beyond what the shell tool documents, and non-ASCII text where a
-count or a width depends on it.
+count or a width depends on it. The suite runs natively on every platform the
+release builds for, so a platform assumption is a failing test rather than a
+report from a user: a permission bit Windows does not carry, a path separator, a
+drive colon in a directory name, or a stand-in binary the host cannot execute.
 
 ## 10. Extension points, and what is deliberately absent
 

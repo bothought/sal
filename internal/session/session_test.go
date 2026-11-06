@@ -59,12 +59,9 @@ func TestSessionRoundTrip(t *testing.T) {
 		t.Fatalf("messages not reconstructed: %+v", loaded.Messages)
 	}
 
-	if !strings.HasSuffix(filepath.Dir(path), ProjectDir("", cwd)[1:]) {
-		// ProjectDir("", cwd) is relative; just check the bucket name appears
-		slug := strings.TrimPrefix(ProjectDir("", cwd), "/")
-		if !strings.Contains(path, slug) {
-			t.Fatalf("session not stored in the project bucket: %s", path)
-		}
+	// The bucket name, wherever the root put it.
+	if slug := filepath.Base(ProjectDir("", cwd)); path != "" && !strings.Contains(path, slug) {
+		t.Fatalf("session not stored in the project bucket %q: %s", slug, path)
 	}
 }
 
@@ -118,7 +115,13 @@ func TestSessionsAreGroupedPerDirectory(t *testing.T) {
 	a := t.TempDir()
 	b := t.TempDir()
 
-	if _, err := New(root, a, "in-a", "m"); err != nil {
+	sess, err := New(root, a, "in-a", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close the file: Windows refuses to remove a directory whose file is still
+	// open, so an unclosed handle fails the test's own cleanup.
+	if err := sess.Close(); err != nil {
 		t.Fatal(err)
 	}
 	infosA, _ := List(root, a, false)
@@ -136,6 +139,8 @@ func isolate(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// Windows resolves the home directory from USERPROFILE, not HOME.
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("SAL_SESSION_DIR", "")
 	return home
@@ -436,5 +441,86 @@ func TestShortenedResultsMissingFromTheLogAreSkipped(t *testing.T) {
 	got := s.CompactionShortenedIndexes()
 	if len(got) != 1 || got[0] != 1 {
 		t.Fatalf("only the resolvable id should survive: %v", got)
+	}
+}
+
+// TestProjectDirIsValidOnEveryPlatform pins the bucket rule: the name has to be
+// usable as a directory wherever sal runs, and a Windows path carries a colon
+// that a file name cannot hold.
+func TestProjectDirIsValidOnEveryPlatform(t *testing.T) {
+	root := t.TempDir()
+	for _, cwd := range []string{
+		`C:\work\project`,
+		`C:\`,
+		`/home/me/work/project`,
+		`/`,
+		`/work/spaces and (parens)/x`,
+	} {
+		got := filepath.Base(ProjectDir(root, cwd))
+		if got == "" || got == "." || got == ".." {
+			t.Fatalf("ProjectDir(%q) produced %q", cwd, got)
+		}
+		for _, r := range got {
+			if strings.ContainsRune(`<>:"/\|?*`, r) {
+				t.Fatalf("ProjectDir(%q) = %q, which contains %q and is not a valid file name", cwd, got, r)
+			}
+		}
+		// Two different directories must not share one bucket.
+		other := filepath.Base(ProjectDir(root, cwd+"-other"))
+		if other == got {
+			t.Fatalf("ProjectDir collapsed %q and its neighbour into %q", cwd, got)
+		}
+	}
+	// The bucket is actually writable on the host running the suite.
+	dir := ProjectDir(root, t.TempDir())
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("cannot create the project bucket %s: %v", dir, err)
+	}
+}
+
+// TestOneDirectoryIsOneBucketThroughASymlink covers the case macOS exposes: the
+// working directory can be spelled two ways, one through a symbolic link (a
+// temporary directory is /var/... but resolves to /private/var/...), and both
+// spellings must find the same sessions. Linux reaches a project behind a link
+// the same way.
+func TestOneDirectoryIsOneBucketThroughASymlink(t *testing.T) {
+	root := t.TempDir()
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+
+	if ProjectDir(root, real) != ProjectDir(root, link) {
+		t.Fatalf("the same directory produced two buckets:\n  %s\n  %s",
+			ProjectDir(root, real), ProjectDir(root, link))
+	}
+
+	sess, err := New(root, link, "through a link", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.AppendMessage(agent.NewUserMessage("hi"))
+	_ = sess.Close()
+
+	// Listing the physical spelling finds what was written through the link.
+	infos, err := List(root, real, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 || infos[0].ID != sess.ID {
+		t.Fatalf("the session was not found through the other spelling: %+v", infos)
+	}
+	// And its recorded cwd is the physical path, so the cross-bucket filter
+	// recognises it too.
+	if infos[0].Cwd != ProjectDir("", real) && filepath.Base(infos[0].Cwd) == "" {
+		t.Fatalf("recorded cwd = %q", infos[0].Cwd)
+	}
+	all, err := List(root, real, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("the machine-wide listing did not recognise the directory: %+v", all)
 	}
 }

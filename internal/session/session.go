@@ -60,14 +60,51 @@ func LatestIn(roots []string, cwd string, all bool) (string, error) {
 	return newest, nil
 }
 
-// ProjectDir is the per-working-directory bucket, derived from an absolute cwd
-// so sessions are grouped by project.
-func ProjectDir(root, cwd string) string {
+// canonicalDir resolves a working directory to the path that identifies it, so
+// the same directory always lands in the same bucket.
+//
+// An absolute path is not enough: a path can be reached through a symbolic link
+// (macOS reaches temporary directories through /private/var, and a person may
+// keep a project behind a link), and the two spellings would otherwise become
+// two buckets. Resolving first makes the identity physical. A path that cannot
+// be resolved is used as written.
+func canonicalDir(cwd string) string {
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
 		abs = cwd
 	}
-	slug := strings.Trim(strings.ReplaceAll(filepath.ToSlash(abs), "/", "-"), "-")
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
+// ProjectDir is the per-working-directory bucket, derived from a canonical cwd
+// so sessions are grouped by project.
+//
+// The slug has to be usable as a directory name on every platform the program
+// runs on, so it is built by an explicit rule rather than by replacing
+// separators: a Windows path starts with a drive ("C:\work"), and the colon is
+// illegal in a file name there, so a plain separator replacement would create a
+// bucket that cannot be written.
+func ProjectDir(root, cwd string) string {
+	abs := canonicalDir(cwd)
+	var b strings.Builder
+	for _, r := range abs {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			// Separators, drive colons and anything else a file name cannot
+			// carry all become the same separator, so the bucket stays one
+			// directory.
+			if b.Len() > 0 && !strings.HasSuffix(b.String(), "-") {
+				b.WriteByte('-')
+			}
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
 	if slug == "" {
 		slug = "root"
 	}
@@ -162,7 +199,7 @@ func New(root, cwd, name, model string) (*Session, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	abs, _ := filepath.Abs(cwd)
+	abs := canonicalDir(cwd)
 	id := newID()
 	stamp := time.Now().Format("20060102-150405")
 	path := filepath.Join(dir, fmt.Sprintf("%s-%s.jsonl", stamp, id[:8]))
@@ -472,9 +509,7 @@ func List(root, cwd string, all bool) ([]Info, error) {
 // recorded cwd is wanted (when wanted is not empty).
 func listAll(root, wanted string) ([]Info, error) {
 	if strings.TrimSpace(wanted) != "" {
-		if abs, err := filepath.Abs(wanted); err == nil {
-			wanted = abs
-		}
+		wanted = canonicalDir(wanted)
 	}
 	var infos []Info
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {

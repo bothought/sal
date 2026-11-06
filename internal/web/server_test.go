@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -623,11 +624,13 @@ func TestTokenFileIsCreatedAndReused(t *testing.T) {
 	if len(first.Token()) < 16 {
 		t.Fatalf("token = %q, want a generated token", first.Token())
 	}
-	st, err := os.Stat(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("token file was not written: %v", err)
 	}
-	if perm := st.Mode().Perm(); perm != 0o600 {
+	// The mode is only meaningful where the platform keeps POSIX permissions;
+	// Windows reports a fixed mode for every file, so asserting it there would
+	// test the host and not the program.
+	if perm, ok := posixFileMode(path); ok && perm != 0o600 {
 		t.Fatalf("token file mode = %04o, want 0600", perm)
 	}
 
@@ -1421,4 +1424,18 @@ func TestCompactionBlockReportsTheKeptTurns(t *testing.T) {
 	if !strings.Contains(body, "the 2 most recent turns kept") {
 		t.Fatalf("the block should report the turns it kept: %q", body)
 	}
+}
+
+// posixFileMode reports a file's permission bits, and whether the host's
+// filesystem actually carries them. Windows does not, so a test must not read
+// the number there.
+func posixFileMode(path string) (os.FileMode, bool) {
+	if runtime.GOOS == "windows" {
+		return 0, false
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, false
+	}
+	return st.Mode().Perm(), true
 }

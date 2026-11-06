@@ -121,11 +121,8 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	shell := "sh"
-	if _, err := exec.LookPath("bash"); err == nil {
-		shell = "bash"
-	}
-	cmd := exec.Command(shell, "-c", a.Command)
+	shell, shellArgs := shellCommand(a.Command)
+	cmd := exec.Command(shell, shellArgs...)
 	cmd.Dir = workdir
 	cmd.Env = append(os.Environ(), "SAL=1")
 	buf := newCappedBuffer(maxBashOutput)
@@ -139,6 +136,13 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	runErr := cmd.Start()
 	if runErr != nil {
 		return "", fmt.Errorf("failed to start command: %w", runErr)
+	}
+	// A job object on Windows can only take the process once it exists, and it
+	// has to happen before the command can start children of its own.
+	if err := afterStart(cmd); err != nil {
+		killProcessGroup(cmd)
+		_ = cmd.Wait()
+		return "", fmt.Errorf("failed to contain the command: %w", err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -154,6 +158,9 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 		<-done
 		runErr = runCtx.Err()
 	}
+	// Drop the containment handle on every path, so a finished command does not
+	// keep one open.
+	releaseProcessGroup(cmd)
 	elapsed := time.Since(start)
 
 	out := buf.String()

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,8 @@ import (
 func withEnv(t *testing.T, home string, kv map[string]string) {
 	t.Helper()
 	t.Setenv("HOME", home)
+	// Windows resolves the home directory from USERPROFILE, not HOME.
+	t.Setenv("USERPROFILE", home)
 	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "SAL_CONFIG", "SAL_SESSION_DIR"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -240,6 +243,9 @@ func TestUnknownKeysAreWarnedAbout(t *testing.T) {
 }
 
 func TestWorldReadableConfigWithKeyWarns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not carry POSIX permission bits, so the check cannot fire")
+	}
 	home := t.TempDir()
 	withEnv(t, home, nil)
 	p := Resolve()

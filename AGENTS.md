@@ -43,11 +43,11 @@ go test -race ./...    # Linux/macOS
 gofmt -l .             # must print nothing
 ```
 
-CI runs vet, the tests, and the race detector on Linux. macOS and Windows are
-part of the target set but are not in the matrix yet, to keep iteration fast;
-keep tests portable anyway, so turning them back on is a workflow change: no
-`/tmp` literals, no assumptions about the host shell beyond what the `bash` tool
-documents, and no test that depends on a file mode a git checkout cannot carry.
+CI runs the suite natively on Linux, macOS and Windows, and the race detector on
+Linux and macOS. Keep tests portable: no `/tmp` literals, no assumptions about
+the host shell beyond what the `bash` tool documents, and no test that depends on
+a file mode a git checkout (or Windows) cannot carry — assert what the program
+did, not what the host's filesystem reports.
 Tests come with the change: the suite runs the real agent loop against a
 scripted SSE server and the real tools against temp directories, so an end-to-end
 test for a new path is usually straightforward.

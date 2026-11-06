@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -237,7 +238,7 @@ func TestBashCapturesOutputExitCodeAndWorkdir(t *testing.T) {
 	}
 	tool := New("bash", dir)
 
-	out, err := tool.Run(context.Background(), args(t, bashArgs{Command: "echo hello && pwd"}))
+	out, err := tool.Run(context.Background(), args(t, bashArgs{Command: "echo hello"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,19 +246,28 @@ func TestBashCapturesOutputExitCodeAndWorkdir(t *testing.T) {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 
-	out, err = tool.Run(context.Background(), args(t, bashArgs{Command: "pwd", Workdir: "sub"}))
+	// The working directory is checked by what a command writes, not by `pwd`:
+	// the shell differs by platform, and the effect is what matters.
+	if _, err := tool.Run(context.Background(), args(t, bashArgs{Command: "echo here > marker.txt", Workdir: "sub"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sub", "marker.txt")); err != nil {
+		t.Fatalf("workdir not honoured: %v", err)
+	}
+
+	out, err = tool.Run(context.Background(), args(t, bashArgs{Command: "echo boom 1>&2"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, filepath.Join(dir, "sub")) {
-		t.Fatalf("workdir not honoured:\n%s", out)
+	if !strings.Contains(out, "boom") {
+		t.Fatalf("stderr should be captured:\n%s", out)
 	}
 
-	out, err = tool.Run(context.Background(), args(t, bashArgs{Command: "echo boom >&2; exit 3"}))
+	out, err = tool.Run(context.Background(), args(t, bashArgs{Command: "exit 3"}))
 	if err == nil {
 		t.Fatal("expected an error for a non-zero exit code")
 	}
-	if !strings.Contains(out, "boom") || !strings.Contains(out, "exit code 3") {
+	if !strings.Contains(out, "exit code 3") {
 		t.Fatalf("output should still be reported:\n%s", out)
 	}
 }
@@ -265,7 +275,7 @@ func TestBashCapturesOutputExitCodeAndWorkdir(t *testing.T) {
 func TestBashTimeoutKillsCommand(t *testing.T) {
 	tool := New("bash", t.TempDir())
 	start := time.Now()
-	out, err := tool.Run(context.Background(), args(t, bashArgs{Command: "sleep 30", TimeoutSeconds: 1}))
+	out, err := tool.Run(context.Background(), args(t, bashArgs{Command: longRunningCommand(), TimeoutSeconds: 1}))
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expected a timeout error")
@@ -307,4 +317,14 @@ func TestToolSchemasAreValidJSON(t *testing.T) {
 			t.Fatalf("%s: missing description", tool.Name())
 		}
 	}
+}
+
+// longRunningCommand returns a command that sleeps longer than any test timeout,
+// in the shell the bash tool will actually use on this platform.
+func longRunningCommand() string {
+	if runtime.GOOS == "windows" {
+		// ping waits a second per echo; 30 of them outlast the timeout.
+		return "ping -n 30 127.0.0.1"
+	}
+	return "sleep 30"
 }

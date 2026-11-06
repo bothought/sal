@@ -10,11 +10,20 @@ permissions:
 
 jobs:
   test:
-    # Only Linux for now, to keep iteration fast while the feature is being
-    # built. macOS and Windows come back before release; nothing in the suite is
-    # allowed to depend on the host, so their return is a workflow change and
-    # not a test change.
-    runs-on: ubuntu-latest
+    # The suite is portability-tested against every platform the release builds
+    # for, so a change that only works on Linux cannot land. Windows and macOS
+    # run the tests; the race detector runs where it is supported.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            race: true
+          - os: macos-latest
+            race: true
+          - os: windows-latest
+            race: false
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -22,16 +31,29 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Check formatting
+        # .gitattributes pins the line endings, so a Windows checkout has the
+        # same bytes as a Linux one and this check means the same thing there.
         run: test -z "$(gofmt -l .)"
       - name: Vet
         run: go vet ./...
       - name: Test
         run: go test ./...
       - name: Test with the race detector
+        if: matrix.race
         run: go test -race ./...
-      # `sal upgrade` picks an asset per platform and has one source file per
-      # operating system, so every platform the release builds for must at
-      # least compile here.
+
+  # `sal upgrade` picks an asset per platform and has one source file per
+  # operating system, so every platform the release builds for must at least
+  # compile. This is a cross-compile check, not a test: the platform tests above
+  # run natively.
+  cross-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Cross-compile the release targets
         run: |
           set -eu
