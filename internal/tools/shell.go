@@ -121,11 +121,8 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	shell := "sh"
-	if _, err := exec.LookPath("bash"); err == nil {
-		shell = "bash"
-	}
-	cmd := exec.Command(shell, "-c", a.Command)
+	shell, shellArgs := shellCommand(a.Command)
+	cmd := exec.Command(shell, shellArgs...)
 	cmd.Dir = workdir
 	cmd.Env = append(os.Environ(), "SAL=1")
 	buf := newCappedBuffer(maxBashOutput)

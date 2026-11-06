@@ -59,12 +59,9 @@ func TestSessionRoundTrip(t *testing.T) {
 		t.Fatalf("messages not reconstructed: %+v", loaded.Messages)
 	}
 
-	if !strings.HasSuffix(filepath.Dir(path), ProjectDir("", cwd)[1:]) {
-		// ProjectDir("", cwd) is relative; just check the bucket name appears
-		slug := strings.TrimPrefix(ProjectDir("", cwd), "/")
-		if !strings.Contains(path, slug) {
-			t.Fatalf("session not stored in the project bucket: %s", path)
-		}
+	// The bucket name, wherever the root put it.
+	if slug := filepath.Base(ProjectDir("", cwd)); path != "" && !strings.Contains(path, slug) {
+		t.Fatalf("session not stored in the project bucket %q: %s", slug, path)
 	}
 }
 
@@ -136,6 +133,8 @@ func isolate(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// Windows resolves the home directory from USERPROFILE, not HOME.
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("SAL_SESSION_DIR", "")
 	return home
@@ -436,5 +435,39 @@ func TestShortenedResultsMissingFromTheLogAreSkipped(t *testing.T) {
 	got := s.CompactionShortenedIndexes()
 	if len(got) != 1 || got[0] != 1 {
 		t.Fatalf("only the resolvable id should survive: %v", got)
+	}
+}
+
+// TestProjectDirIsValidOnEveryPlatform pins the bucket rule: the name has to be
+// usable as a directory wherever sal runs, and a Windows path carries a colon
+// that a file name cannot hold.
+func TestProjectDirIsValidOnEveryPlatform(t *testing.T) {
+	root := t.TempDir()
+	for _, cwd := range []string{
+		`C:\work\project`,
+		`C:\`,
+		`/home/me/work/project`,
+		`/`,
+		`/work/spaces and (parens)/x`,
+	} {
+		got := filepath.Base(ProjectDir(root, cwd))
+		if got == "" || got == "." || got == ".." {
+			t.Fatalf("ProjectDir(%q) produced %q", cwd, got)
+		}
+		for _, r := range got {
+			if strings.ContainsRune(`<>:"/\|?*`, r) {
+				t.Fatalf("ProjectDir(%q) = %q, which contains %q and is not a valid file name", cwd, got, r)
+			}
+		}
+		// Two different directories must not share one bucket.
+		other := filepath.Base(ProjectDir(root, cwd+"-other"))
+		if other == got {
+			t.Fatalf("ProjectDir collapsed %q and its neighbour into %q", cwd, got)
+		}
+	}
+	// The bucket is actually writable on the host running the suite.
+	dir := ProjectDir(root, t.TempDir())
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("cannot create the project bucket %s: %v", dir, err)
 	}
 }

@@ -62,12 +62,33 @@ func LatestIn(roots []string, cwd string, all bool) (string, error) {
 
 // ProjectDir is the per-working-directory bucket, derived from an absolute cwd
 // so sessions are grouped by project.
+//
+// The slug has to be usable as a directory name on every platform the program
+// runs on, so it is built by an explicit rule rather than by replacing
+// separators: a Windows path starts with a drive ("C:\work"), and the colon is
+// illegal in a file name there, so a plain separator replacement would create a
+// bucket that cannot be written.
 func ProjectDir(root, cwd string) string {
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
 		abs = cwd
 	}
-	slug := strings.Trim(strings.ReplaceAll(filepath.ToSlash(abs), "/", "-"), "-")
+	var b strings.Builder
+	for _, r := range abs {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			// Separators, drive colons and anything else a file name cannot
+			// carry all become the same separator, so the bucket stays one
+			// directory.
+			if b.Len() > 0 && !strings.HasSuffix(b.String(), "-") {
+				b.WriteByte('-')
+			}
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
 	if slug == "" {
 		slug = "root"
 	}

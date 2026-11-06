@@ -22,6 +22,8 @@ func isolateXDG(t *testing.T) (home, cfgHome, dataHome string) {
 	cfgHome = filepath.Join(home, "config")
 	dataHome = filepath.Join(home, "data")
 	t.Setenv("HOME", home)
+	// Windows resolves the home directory from USERPROFILE, not HOME.
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", cfgHome)
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))

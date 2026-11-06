@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -169,13 +170,16 @@ type fakeRelease struct {
 	server    *httptest.Server
 	assetName string
 	asset     []byte
-	checksum  string
-	tag       string
+	// assetBinary is the program inside the archive, kept so a test can compare
+	// what was installed with what was served.
+	assetBinary []byte
+	checksum    string
+	tag         string
 }
 
-func newFakeRelease(t *testing.T, p target, script string) *fakeRelease {
+func newFakeRelease(t *testing.T, p target, script []byte) *fakeRelease {
 	t.Helper()
-	f := &fakeRelease{tag: "v9.9.9", assetName: "sal_9.9.9" + p.suffix}
+	f := &fakeRelease{tag: "v9.9.9", assetName: "sal_9.9.9" + p.suffix, assetBinary: script}
 	var buf bytes.Buffer
 	if p.zip {
 		zw := zip.NewWriter(&buf)
@@ -183,7 +187,7 @@ func newFakeRelease(t *testing.T, p target, script string) *fakeRelease {
 		if err != nil {
 			t.Fatal(err)
 		}
-		w.Write([]byte(script))
+		w.Write(script)
 		if err := zw.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +197,7 @@ func newFakeRelease(t *testing.T, p target, script string) *fakeRelease {
 		if err := tw.WriteHeader(&tar.Header{Name: p.binary, Mode: 0o755, Size: int64(len(script))}); err != nil {
 			t.Fatal(err)
 		}
-		tw.Write([]byte(script))
+		tw.Write(script)
 		if err := tw.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -236,18 +240,42 @@ func hostTarget(t *testing.T) target {
 	return p
 }
 
-// executableScript is a stand-in binary that reports the release version. It
-// needs a POSIX shell, so the tests that execute it are skipped on Windows.
-func executableScript(version string) string {
-	return "#!/bin/sh\necho sal " + version + "\n"
+// executableScript is a stand-in binary that reports the release version.
+//
+// It is a real program, built for the host platform, rather than a shell
+// script: the upgrade runs the extracted file, and Windows has no POSIX shell
+// that could execute one. Building it also keeps the test honest about what the
+// version check actually does.
+func executableScript(t *testing.T, version string) []byte {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	body := "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"sal " + version + "\") }\n"
+	if err := os.WriteFile(src, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "bin")
+	if runtime.GOOS == "windows" {
+		out += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", out, src)
+	cmd.Dir = dir
+	// A temp file with no module of its own: build it in module-less mode, and
+	// reuse the toolchain that is already running the suite.
+	cmd.Env = append(os.Environ(), "GO111MODULE=off", "GOFLAGS=")
+	if msg, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("cannot build the stand-in binary here: %v\n%s", err, msg)
+	}
+	bin, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bin
 }
 
 func TestUpgradeReplacesTheBinary(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the test binary is a shell script")
-	}
 	p := hostTarget(t)
-	f := newFakeRelease(t, p, executableScript("9.9.9"))
+	f := newFakeRelease(t, p, executableScript(t, "9.9.9"))
 
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "sal")
@@ -270,14 +298,15 @@ func TestUpgradeReplacesTheBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(body) != executableScript("9.9.9") {
-		t.Fatalf("the binary was not replaced: %q", body)
+	if !bytes.Equal(body, f.assetBinary) {
+		t.Fatalf("the binary was not replaced (%d bytes, want %d)", len(body), len(f.assetBinary))
 	}
 	info, err := os.Stat(exe)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o100 == 0 {
+	// The execute bit is only meaningful where the platform carries it.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o100 == 0 {
 		t.Fatalf("the replaced binary is not executable: %v", info.Mode())
 	}
 	if !strings.Contains(out.String(), "sal upgraded to 9.9.9") {
@@ -290,11 +319,8 @@ func TestUpgradeReplacesTheBinary(t *testing.T) {
 // TestUpgradeFollowsSymlink checks that an upgrade replaces the file a link
 // points to and leaves the link where it is.
 func TestUpgradeFollowsSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the test binary is a shell script")
-	}
 	p := hostTarget(t)
-	f := newFakeRelease(t, p, executableScript("9.9.9"))
+	f := newFakeRelease(t, p, executableScript(t, "9.9.9"))
 
 	dir := t.TempDir()
 	real := filepath.Join(dir, "sal-real")
@@ -318,17 +344,20 @@ func TestUpgradeFollowsSymlink(t *testing.T) {
 		t.Fatalf("the link was not preserved: %q, %v", target, err)
 	}
 	body, _ := os.ReadFile(real)
-	if string(body) != executableScript("9.9.9") {
-		t.Fatalf("the file behind the link was not replaced: %q", body)
+	if !bytes.Equal(body, f.assetBinary) {
+		t.Fatalf("the file behind the link was not replaced (%d bytes, want %d)", len(body), len(f.assetBinary))
 	}
 }
 
 func TestCheckWritesNothing(t *testing.T) {
 	p := hostTarget(t)
-	f := newFakeRelease(t, p, executableScript("9.9.9"))
+	f := newFakeRelease(t, p, executableScript(t, "9.9.9"))
 
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "sal")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
 	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +385,7 @@ func TestCheckWritesNothing(t *testing.T) {
 
 func TestUpgradeRefusesBadChecksum(t *testing.T) {
 	p := hostTarget(t)
-	f := newFakeRelease(t, p, executableScript("9.9.9"))
+	f := newFakeRelease(t, p, executableScript(t, "9.9.9"))
 	f.checksum = strings.Repeat("0", 64)
 
 	dir := t.TempDir()
@@ -380,13 +409,10 @@ func TestUpgradeRefusesBadChecksum(t *testing.T) {
 }
 
 func TestUpgradeRejectsWrongVersion(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the test binary is a shell script")
-	}
 	p := hostTarget(t)
 	// The archive is well formed and checksummed, but its binary is not the
 	// release the tag names.
-	f := newFakeRelease(t, p, executableScript("0.0.1"))
+	f := newFakeRelease(t, p, executableScript(t, "0.0.1"))
 
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "sal")
@@ -463,7 +489,7 @@ func assertNoTempFiles(t *testing.T, dir string) {
 // TestUpgradeIsSkippedWhenCurrent covers the "nothing to do" path of an upgrade.
 func TestUpgradeIsSkippedWhenCurrent(t *testing.T) {
 	p := hostTarget(t)
-	f := newFakeRelease(t, p, executableScript("9.9.9"))
+	f := newFakeRelease(t, p, executableScript(t, "9.9.9"))
 	f.tag = "v0.1.0"
 
 	dir := t.TempDir()
