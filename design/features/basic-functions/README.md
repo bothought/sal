@@ -135,7 +135,11 @@ Guardrails, all user-visible:
   timeout, kills the whole process group so a shell's children die with it. The
   reported status is the exit code, or that the command timed out and was
   killed. The child runs in the working directory (or `workdir`) with `SAL=1` in
-  its environment.
+  its environment. On Unix-like systems the command runs under `bash`, or `sh`
+  when bash is not installed. On Windows there is no POSIX shell, so bash from
+  Git for Windows is used when it is on `PATH`, and the system command
+  interpreter otherwise; commands written for one shell may need rewriting for
+  the other.
 - `edit` fails when `oldText` is absent, and when it matches more than once
   without `replaceAll`, telling the model to add context or read the file again.
 - `grep` skips VCS metadata and dependency directories (`.git`, `node_modules`,
@@ -245,7 +249,10 @@ joined into one prompt.
 
 Conversations are stored as JSONL files, one JSON object per line, under
 `$XDG_DATA_HOME/sal/sessions/<slugified-cwd>/<timestamp>-<id8>.jsonl`
-(`--session-dir`, `session_dir`, `$SAL_SESSION_DIR` override the root). Each
+(`--session-dir`, `session_dir`, `$SAL_SESSION_DIR` override the root). The
+slug is the absolute working directory with its separators flattened into
+dashes and any character a file name cannot carry replaced, so a Windows path
+(`C:\work\project`) yields a directory name that is valid there. Each
 file starts with a session header (id, working directory, model, name) and then
 records every message as the run appends it, so persistence is append-only and a
 process killed mid-run leaves a readable file. `--no-session` disables storage
