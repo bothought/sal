@@ -17,6 +17,12 @@ func setProcessGroup(cmd *exec.Cmd) error {
 	return nil
 }
 
+// afterStart is a no-op: a Unix process group is set before the process starts.
+func afterStart(*exec.Cmd) error { return nil }
+
+// releaseProcessGroup is a no-op where there is no handle to drop.
+func releaseProcessGroup(*exec.Cmd) {}
+
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return

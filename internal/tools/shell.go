@@ -137,6 +137,13 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	if runErr != nil {
 		return "", fmt.Errorf("failed to start command: %w", runErr)
 	}
+	// A job object on Windows can only take the process once it exists, and it
+	// has to happen before the command can start children of its own.
+	if err := afterStart(cmd); err != nil {
+		killProcessGroup(cmd)
+		_ = cmd.Wait()
+		return "", fmt.Errorf("failed to contain the command: %w", err)
+	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
@@ -151,6 +158,9 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 		<-done
 		runErr = runCtx.Err()
 	}
+	// Drop the containment handle on every path, so a finished command does not
+	// keep one open.
+	releaseProcessGroup(cmd)
 	elapsed := time.Since(start)
 
 	out := buf.String()

@@ -132,9 +132,10 @@ Guardrails, all user-visible:
   the line range and total, and truncates a file larger than 400 KiB.
 - `bash` keeps at most 64 KiB of output (head and tail, with a marker for what
   was dropped), runs with a timeout (default 120s, capped at 600s) and, on
-  timeout, kills the whole process group so a shell's children die with it. The
-  reported status is the exit code, or that the command timed out and was
-  killed. The child runs in the working directory (or `workdir`) with `SAL=1` in
+  timeout, kills the whole process tree so a shell's children die with it: the
+  child is put in its own process group on Unix-like systems, and on Windows the
+  shell is started in a job object that is terminated as a unit. The reported
+  status is the exit code, or that the command timed out and was killed. The child runs in the working directory (or `workdir`) with `SAL=1` in
   its environment. On Unix-like systems the command runs under `bash`, or `sh`
   when bash is not installed. On Windows there is no POSIX shell, so bash from
   Git for Windows is used when it is on `PATH`, and the system command

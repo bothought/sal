@@ -115,7 +115,13 @@ func TestSessionsAreGroupedPerDirectory(t *testing.T) {
 	a := t.TempDir()
 	b := t.TempDir()
 
-	if _, err := New(root, a, "in-a", "m"); err != nil {
+	sess, err := New(root, a, "in-a", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close the file: Windows refuses to remove a directory whose file is still
+	// open, so an unclosed handle fails the test's own cleanup.
+	if err := sess.Close(); err != nil {
 		t.Fatal(err)
 	}
 	infosA, _ := List(root, a, false)
