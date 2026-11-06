@@ -55,9 +55,9 @@ stays small:
   testable against a scripted fake. Neither front end computes a figure, decides
   what the model is sent, or touches a session file.
 - **Sessions are injected.** The main package builds one set of callbacks
-  (describe, identify, list, start, open) and hands the same ones to both front
-  ends, so "/switch" means the same thing in each and no front end learns the
-  file layout.
+  (describe, identify, start over, open another directory's conversation) and
+  hands the same ones to both front ends, so `/new` means the same thing in each
+  and no front end learns the file layout.
 - **One observation channel.** The loop reports everything that happens as a
   stream of events, and every interface is a fold over that stream. Anything an
   interface displays is an event first; nothing needs to reach back into the
@@ -163,27 +163,31 @@ truncated.
 A session is an append-only JSONL file, and the format is the contract:
 
 - Every line is one entry with a type, an id, a timestamp, and the payload that
-  type carries: the session header, a message, a rename, a model change, a
-  compaction.
+  type carries: the header, a message, a rename, a model change, a compaction.
 - The header records the session id, the working directory, the model and the
   name. A message entry embeds the neutral message type, which is why a stored
   conversation replays straight into the agent.
-- Writes go through one append-only handle behind a mutex, line by line, so a
-  process that dies mid-write leaves a file whose truncated last line is skipped
-  when it is read back.
-- Files live under a per-project bucket derived from the absolute working
-  directory, so grouping survives a rename of anything but the directory. The
-  derivation must produce a name the platform accepts as a directory: a Windows
-  drive path carries a colon, which the filesystem there rejects, so the
-  flattening is a platform-independent rule rather than a plain replacement of
-  separators.
-- Listing and lookup are the same query at different scopes: one project bucket,
-  or every bucket filtered by the recorded working directory; the newest is
-  picked by the newest entry timestamp with a deterministic tie-break, and a
-  session id can be resolved from its prefix, which is what lets the console
-  reopen a session named in a page URL.
-- Summarising a file for a switcher means parsing it, so listing is proportional
-  to the bytes stored and is only used where a person is choosing a session.
+- **A working directory names exactly one session.** The file lives at a fixed
+  path inside a bucket derived from the canonical working directory, so opening
+  the program there finds it without a lookup, a listing or a choice. The bucket
+  name must be valid on every platform the program runs on, which makes the
+  derivation an explicit rule rather than a separator replacement: a Windows
+  drive colon is rejected by the filesystem. Canonicalising the directory first
+  (resolving links) is what keeps one directory from becoming two buckets.
+- **Writes happen when the conversation changes**, not at exit: one append-only
+  handle behind a mutex, one line per change. A process that dies mid-write
+  leaves a file whose truncated last line is skipped when it is read back, and a
+  process that dies between turns loses nothing. Streamed text is not written
+  incrementally; the finished message is.
+- `--new` moves the file aside rather than deleting it, so starting over is
+  reversible and no code path destroys a conversation.
+- **The layout change is adopted, not migrated.** When the fixed path is absent
+  but timestamped files exist in the same bucket, the newest becomes the
+  conversation; nothing is rewritten, so a newer release that still lists
+  sessions, or a person with the old files, sees what was there.
+- A listing across the machine is a different query — every bucket, filtered by
+  the recorded directory — and is used only where a person asked for one. It is
+  proportional to the bytes stored, because summarising a file means parsing it.
 
 A compaction is one more entry, and it is what makes a resumed session continue
 from the summary instead of replaying the whole log. Because the log stays
@@ -215,8 +219,6 @@ A bubbletea model with a scrolling transcript, an editor and a spinner.
 - **A run belongs to the conversation it started in.** The session id is
   captured at launch and compared when the run finishes, so a turn from a
   session the console has left cannot land in the one it is showing.
-- **The picker** replaces the transcript with a windowed list sized to the
-  terminal, so a short or narrow terminal cannot overflow it.
 - **Layout** gives the transcript the height left over by the editor and the
   footer, and the footer carries the working directory, the model, the status,
   the context segment and the cumulative counters.
@@ -245,10 +247,10 @@ build step and no external asset.
 - **Token persistence.** The token is reused from the state directory across
   restarts, which is what keeps an already-open page working when the process is
   restarted.
-- **Session switching** aborts the run in flight, waits for it to finish so its
-  remaining events cannot land in the new conversation, swaps the session, and
-  rebuilds the transcript from the agent's history. The page keeps the session
-  id in the URL, so a reload reopens the same conversation.
+- **Opening another conversation** aborts the run in flight, waits for it to
+  finish so its remaining events cannot land in the new one, swaps the session,
+  and rebuilds the transcript from the agent's history. The page keeps the
+  session id in the URL, so a reload reopens the same conversation.
 
 ## 7. Configuration and startup
 
@@ -304,11 +306,10 @@ The suite is layered, and the layers exist to keep the real loop under test:
   retry policy is tested without sleeping.
 - **Front ends against a fake agent.** Both interfaces run against a scripted
   fake of the same small interface the real agent satisfies, so folding events,
-  aborting, queueing, switching sessions and the auth checks are covered without
-  a terminal or a socket.
-- **Layout and presentation** are tested where they can break: the picker in a
-  small terminal, the footer's segments, and the transcript blocks a notification
-  produces.
+  aborting, queueing, opening another conversation and the auth checks are
+  covered without a terminal or a socket.
+- **Layout and presentation** are tested where they can break: the footer's
+  segments and the transcript blocks a notification produces.
 
 The same rules apply everywhere: no fixed temporary paths, no assumptions about
 the host shell beyond what the shell tool documents, and non-ASCII text where a

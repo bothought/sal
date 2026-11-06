@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **One conversation per directory.** A working directory now owns exactly one
+  stored session at a fixed path (`sessions/<slug>/session.jsonl`) and opening
+  sal there continues it, so there is nothing to list or switch between. Removed:
+  `/switch`, `/sessions`, the terminal session picker, the web console's session
+  menu, `-c`/`--continue`, and `--continue-all`. Added: `--new` (move the stored
+  session aside and start over), `--dir <path>` (work on another directory's
+  conversation), and `/new [path]` in both consoles. `sal --list-sessions` still
+  prints every conversation on the machine, now by directory.
+- An existing conversation carries over: when the fixed path is absent, the
+  newest timestamped file in that directory's bucket is adopted. Nothing is
+  rewritten or deleted.
+
+### Fixed
+
+- A restart no longer appears to lose the conversation. The session is written
+  as each message is appended, so finished turns are on disk before the process
+  exits; the earlier behaviour required `-c` to find them again.
+
 ## [0.1.4] - 2026-11-05
 
 ### Fixed

@@ -62,7 +62,8 @@ interfaces say so.
 
 The measured base is only valid for the context it was measured in. Anything
 that changes the context's *shape* rather than extending it — a fresh
-conversation, a session switch, a resume, a compaction, a model change — drops
+conversation, opening another directory's conversation, a resume, a compaction,
+a model change — drops
 it, so a stale exact figure is never shown for a different context. The next
 response re-establishes it.
 
@@ -169,9 +170,8 @@ copy of the figures so a redraw never reaches into the agent:
 
 The web console additionally caches the figures in the server's snapshot, which
 is what lets a page that connects mid-run get a consistent footer without asking
-the agent. The session menus in both interfaces mark a compacted session, so the
-gap between a file's message count and the active context is explained where the
-user chooses a session.
+the agent. A resumed conversation reports that it was compacted, so the gap
+between a file's message count and the active context is explained.
 
 ## 7. What this deliberately does not do
 

@@ -22,10 +22,9 @@ Everything sal does is one of four things:
    (`--web`), one-shot print mode (`--print`), and a machine-readable JSON event
    stream (`--mode json`). All four drive the same agent loop with the same
    tools; they differ only in how the run is presented and controlled.
-4. **Sessions and configuration** — conversations are stored as JSONL files
-   grouped per working directory and can be resumed or switched between; the
-   settings that shape a run come from flags, environment variables, and a
-   configuration file.
+4. **Sessions and configuration** — each working directory owns one stored
+   conversation, continued automatically; the settings that shape a run come
+   from flags, environment variables, and a configuration file.
 
 Deliberately out of scope: extensions, skills, prompt templates, packages,
 themes, sub-agents, MCP, plan mode, background bash, session trees, HTML export,
@@ -37,73 +36,29 @@ missing feature is visible here rather than inferred from the code.
 
 ## 2. The agent loop
 
-### 2.1 One prompt, one run
+A *run* starts with a prompt and ends when the model answers without asking for
+a tool; each pass over the model is a *turn*. Standard agent behaviour, listed
+rather than described: the request carries the system prompt, the conversation
+and the enabled tool schemas; answers stream as they arrive; tool calls run in
+the order asked, their results are appended and the model is asked again;
+failures are fed back as tool results instead of ending the run.
 
-A *run* starts when a prompt is submitted and ends when the model stops asking
-for tools. Within a run, each pass over the model is a *turn*.
+**Turn budget.** 32 turns by default (`--max-turns`); running out ends the run
+with an error and keeps the conversation.
 
-The model is asked with the system prompt, the whole conversation so far, and
-the definitions of the enabled tools. The answer is streamed to the interface as
-it arrives. When the answer contains tool calls, every call is executed in the
-order the model asked for it, each result is appended to the conversation, and
-the model is asked again. An answer with no tool calls ends the run.
+**Interrupting.** `esc` aborts the run in flight (the UI reports "aborted by
+user", not a failure), and a retry wait is interrupted immediately. A prompt
+submitted during a run is queued and starts when the run ends.
 
-### 2.2 Turn budget
+**Transient failures.** Connection resets, a keep-alive connection the server
+closed while idle, timeouts, `429` and `5xx` are retried with exponential backoff
+(0.5s…10s, four attempts, `--max-retries`; a negative value disables it). A
+`Retry-After` header wins. Retrying stops at a permanent failure, at a cancelled
+run, and once part of the answer has been streamed. Only the wait for response
+headers is bounded, so a slow but healthy stream is never cut off.
 
-A run is bounded by a maximum number of turns, 32 by default (`--max-turns`,
-`max_turns`). Reaching the limit without a tool-call-free answer ends the run
-with an error saying the agent stopped without a final answer; the conversation
-so far is kept.
-
-### 2.3 What the user sees during a run
-
-- Assistant text appears incrementally as it is streamed.
-- Each tool call appears before it runs, with a one-line summary of its
-  arguments (the `path`, `command`, `pattern` or `query` field, else the raw
-  arguments, truncated), and its output is filled in when the tool returns.
-- A failed tool is not a failed run: the error is recorded as the tool's result
-  and given back to the model, which can adjust. A failed *provider* request
-  fails the turn and ends the run with an error.
-- Token usage is accumulated from the provider's per-request accounting and
-  displayed as input/output counts.
-- A completed turn increments a turn counter.
-
-### 2.4 Interrupting and queueing
-
-- **Abort.** In the terminal UI `esc` cancels the run in flight, in the web
-  console `esc` or the Abort button does, and the cancellation is reported as an
-  abort ("aborted by user"), not as a failure. Aborting during a retry wait stops
-  immediately. Killing the process (ctrl+c, SIGTERM) also cancels the run.
-- **Queue.** A prompt submitted while a run is in flight is queued and started
-  when the current run ends, in submission order. The queue belongs to the
-  conversation: switching sessions (or `/new`) aborts the run in flight and
-  drops its queue, so the turns of one conversation stay together.
-
-### 2.5 Context window
-
-Before each request, if the next request would exceed the configured share of
-the model's context window, the oldest part of the conversation is replaced by a
-summary (see `design/features/context-management`). The retry policy below also
-covers the summarization request.
-
-### 2.6 Transient provider failures
-
-Connection resets (`read: connection reset by peer`), a keep-alive connection
-the server closed while it sat idle (`use of closed network connection`),
-timeouts, and `429`/`5xx` responses are treated as transient and retried with
-exponential backoff — 0.5s, 1s, 2s, 4s, capped at 10s, four attempts by default
-(`--max-retries` / `max_retries`; a negative value disables retrying, `0` means
-the default). A `Retry-After` header from the server wins over the computed
-backoff.
-
-Retrying stops at the first failure that is not transient (a `400`, a bad
-response body), at a cancelled run, and after part of the answer has already been
-streamed — that text has already been shown, so a retry would duplicate it. Each
-retry is reported in every interface. Only the wait for response headers is
-bounded (60s), so a slow but healthy stream is never cut off.
-
-A stream that ends after the headers but before a single byte or `[DONE]` marker
-is also treated as transient, rather than being presented as an empty answer.
+**Context.** Compaction and the context indicator are
+`design/features/context-management`.
 
 ## 3. Tools
 
@@ -122,208 +77,168 @@ read-only run); an unknown name is an error that lists the available tools.
 | `ls` | List a directory, directories marked with a trailing `/`. |
 
 Paths are relative to the working directory or absolute; `~` expands to the home
-directory. A tool's error is reported to the model as a failed result rather
-than aborting the run, and the arguments it was given are validated (a missing
-required argument is such an error).
+directory. Arguments are validated (a missing required one is an error), and a
+tool's error is returned to the model as a failed result rather than ending the
+run.
 
-Guardrails, all user-visible:
-
-- `read` refuses binary files (detects a NUL byte), refuses directories, reports
-  the line range and total, and truncates a file larger than 400 KiB.
-- `bash` keeps at most 64 KiB of output (head and tail, with a marker for what
-  was dropped), runs with a timeout (default 120s, capped at 600s) and, on
-  timeout, kills the whole process tree so a shell's children die with it: the
-  child is put in its own process group on Unix-like systems, and on Windows the
-  shell is started in a job object that is terminated as a unit. The reported
-  status is the exit code, or that the command timed out and was killed. The child runs in the working directory (or `workdir`) with `SAL=1` in
-  its environment. On Unix-like systems the command runs under `bash`, or `sh`
-  when bash is not installed. On Windows there is no POSIX shell, so bash from
-  Git for Windows is used when it is on `PATH`, and the system command
-  interpreter otherwise; commands written for one shell may need rewriting for
-  the other.
-- `edit` fails when `oldText` is absent, and when it matches more than once
-  without `replaceAll`, telling the model to add context or read the file again.
-- `grep` skips VCS metadata and dependency directories (`.git`, `node_modules`,
-  `vendor`, virtualenvs, caches, …), skips files over 2 MiB, caps results
-  (200 by default, 2000 maximum) and says when the cap was reached. An invalid
-  regex is retried as a literal string.
-- `find` applies the same skip list, does not follow into skipped directories,
-  caps results at 1000 and says when it truncated.
-- `ls` caps its listing at 1000 entries and says when it truncated.
-- The result of any single tool is capped at 30 000 characters before it is fed
-  back to the model, keeping head and tail with a truncation marker. Empty
-  output is reported as `(no output)`.
+Guardrails worth knowing, because they change what the model sees: `read` refuses
+binaries and directories and caps at 400 KiB; `bash` keeps 64 KiB of output and
+kills the whole process tree on timeout (default 120s, max 600s); `edit` demands
+a unique match; the search tools skip VCS and dependency directories, ignore
+files over 2 MiB, and cap their results; and any single tool result is capped at
+30 000 characters before it goes back to the model, saying when it was cut.
+`bash` uses `bash`, or `sh` where bash is absent; on Windows it uses bash from
+Git for Windows when present, the system interpreter otherwise.
 
 ## 4. Interfaces
 
-### 4.1 Interactive terminal UI (default)
+Four interfaces drive the same loop with the same tools; they differ only in
+presentation.
 
-The default mode when both stdin and stdout are a terminal. Its screen is:
+### 4.1 Terminal UI (default)
 
-- a **header** line: `sal <version> — <model> (<provider>)` and the working
-  directory, shortened with `~`;
-- a scrollable **transcript** of blocks: user turns (`›`), assistant answers,
-  tool calls (`⚙ name(summary)` with output and duration, or `(running…)` while
-  it runs), system notes, and errors (`✗`);
-- a multi-line **editor** whose border is highlighted while a run is in flight;
-- a **footer** with the working directory on the left and model, status,
-  `ctx used/limit percent`, `↑input ↓output` token counts and turn count on the
-  right. The context segment is the size of the next request (see
-  `design/features/context-management`); the cumulative counters stay separate.
+Used when stdin and stdout are both terminals. A header (version, model,
+provider, directory), a scrollable transcript of blocks (user turns, streaming
+answers, tool calls with output and duration, notes, errors), a multi-line
+editor, and a footer with directory, model, status, `ctx used/limit`, `↑in ↓out`
+and the turn count.
 
-Startup prints the version/model line, the enabled tools, the key bindings, and
-the command list as the first transcript block. A long tool result in the
-transcript is previewed to 12 lines with a "… (N more lines)" marker.
-
-Keys:
-
-| Key | Action |
-|---|---|
-| `enter` | Submit; queues the message if a run is in flight |
-| `alt+enter`, `shift+enter`, `ctrl+j` | Insert a newline |
-| `esc` | Abort the run; with no run, clear the editor; cancel the session picker |
-| `pgup`/`pgdn`, `alt+up`/`alt+down` | Scroll the transcript |
-| `ctrl+l` | Clear the transcript (not the conversation) |
-| `ctrl+c` | Quit (cancelling a run in flight first) |
-
-An initial prompt given on the command line starts as the first run.
+Keys: `enter` submits (queues during a run), `alt+enter` / `shift+enter` /
+`ctrl+j` insert a newline, `esc` aborts, `pgup`/`pgdn` and `alt+↑/↓` scroll,
+`ctrl+l` clears the transcript, `ctrl+c` quits.
 
 ### 4.2 Browser console (`--web`)
 
-`--web` serves the same console to a browser, with the same agent, tools,
-sessions and event stream as the terminal UI, rendered as a plain page with no
-build step and no external assets (it is served from the binary):
+The same console over HTTP with server-sent events; the page is embedded in the
+binary, so there is no build step or external asset. `--web-addr` defaults to
+`127.0.0.1:8080`.
 
-- `--web-addr` selects the listen address; it defaults to `127.0.0.1:8080` and
-  stays on loopback.
-- The startup line prints the URL, which carries an access token and the session
-  the console was opened in. Every request must present the token (header or
-  query parameter), which is what stops a page on another origin from reaching
-  the API through the browser's loopback access — the console can run shell
-  commands.
-- The token is persisted in `$XDG_STATE_HOME/sal/web-token` (mode `0600`) and
-  reused, so a page that is already open keeps working after the process is
-  restarted: reload it and it reconnects. `--web-token` / `$SAL_WEB_TOKEN`
-  override it with a fixed value (a development convenience).
-- The page has a header (title, working directory, session menu), a transcript
-  with the same block kinds as the terminal UI, a composer (`Send`, `Abort`,
-  `enter` sends, `shift+enter` inserts a newline, `esc` aborts), and a footer
-  with the session, the context-window segment, and token usage.
-- The session id is kept in the URL, so reloading a tab reopens the same
-  conversation; `/new` rewrites the URL. Loading a URL naming another session
-  reopens that stored session and rebuilds the transcript, marked as restored.
-- The stream is server-sent events. Every (re)connection starts from a full
-  snapshot of the transcript, so a dropped connection never duplicates or loses
-  blocks; the client reconnects on its own.
-- A restarted server starts a fresh session unless `-c`/`--continue` is given,
-  which reattaches to the most recent session for the directory — the
-  rebuild-and-reload loop.
-- Restoring a transcript from a stored session brings tool output back whole,
-  but per-call durations are not in the session file and are lost.
+- Every request needs the access token, which the startup URL carries and the
+  page keeps; the token is persisted in `$XDG_STATE_HOME/sal/web-token` so an
+  open tab survives a restart. `--web-token` / `$SAL_WEB_TOKEN` pin a value.
+- The session id rides in the URL: reloading reopens that conversation, and a
+  restarted server continues the directory's conversation.
+- Every (re)connection starts from a full snapshot, so a dropped stream never
+  duplicates or loses blocks.
 
-### 4.3 Print mode (`-p`, `--print`)
+### 4.3 Print mode (`--print` / `-p`)
 
-One-shot: run the prompt, stream the answer to stdout, exit. Tool activity is
-written to stderr (`⚙ tool(summary)`, `  ↳ ok|error (Nms)`), as are errors and
-retry notices, so stdout stays the answer alone. A trailing newline is added
-only when something was printed. An empty prompt is an error.
+One-shot: the answer streams to stdout, tool activity and errors go to stderr, so
+stdout is the answer alone.
 
 ### 4.4 JSON mode (`--mode json`)
 
-The same run, with every agent event encoded as one JSON object per line on
-stdout, for scripts and other programs: text deltas, tool calls, tool results,
-turn ends, usage, retries, errors, and a final `done`. An empty prompt is an
-error. `--mode text` selects the interactive text UI when stdout is a terminal
-(even with stdin redirected); `--mode json` always takes precedence.
+The same run as one JSON object per line on stdout: text deltas, tool calls and
+results, usage, retries, errors, and a final `done`.
 
 ### 4.5 Piped input and `@file`
 
-Non-terminal stdin is read (up to 4 MiB) and prepended to the prompt, so
-`cat main.go | sal -p "review this"` works. Positional arguments starting with
-`@` name files, whose contents are embedded as `<file path="...">…</file>`
-blocks (each capped at 512 KiB) ahead of the written prompt. Message words are
-joined into one prompt.
+Non-terminal stdin (up to 4 MiB) is prepended to the prompt, so
+`cat main.go | sal -p "review this"` works. An argument starting with `@` embeds
+that file (`<file path="...">…</file>`, capped at 512 KiB) ahead of the prompt.
 
 ## 5. Sessions
 
-### 5.1 Storage and grouping
+**One directory, one conversation.** A working directory owns exactly one stored
+session; opening sal there continues it, and there is nothing to list or switch
+between. This keeps the model simple: the identity of a conversation is the
+directory it belongs to.
 
-Conversations are stored as JSONL files, one JSON object per line, under
-`$XDG_DATA_HOME/sal/sessions/<slugified-cwd>/<timestamp>-<id8>.jsonl`
-(`--session-dir`, `session_dir`, `$SAL_SESSION_DIR` override the root). The
-slug is the absolute working directory with its separators flattened into
-dashes and any character a file name cannot carry replaced, so a Windows path
-(`C:\work\project`) yields a directory name that is valid there. Each
-file starts with a session header (id, working directory, model, name) and then
-records every message as the run appends it, so persistence is append-only and a
-process killed mid-run leaves a readable file. `--no-session` disables storage
-entirely; the conversation then lives only in memory.
+### 5.1 Storage
 
-Each stored session carries an id (16 hex characters, shown as its first 8), a
-display name (default: the id prefix, or `--name`/`name`), a model, the working
-directory, a message count and an update time. A session that has been compacted
-says so in the switcher, since its active context is shorter than its file.
+A session is a JSONL file, one entry per line, under
+`$XDG_DATA_HOME/sal/sessions/<slug>/session.jsonl`, where `<slug>` is the
+canonical working directory flattened into a valid file name (`C:\work\project`
+becomes a name Windows accepts). `--session-dir` / `session_dir` /
+`$SAL_SESSION_DIR` override the root. `--no-session` disables storage; the
+conversation then lives only in memory.
 
-### 5.2 Resuming from the command line
+The file starts with a header (session id, working directory, model, name) and
+records each entry as it happens. It is append-only, so a process killed
+mid-write leaves a readable file; a truncated last line is skipped when it is
+read back.
+
+A file written before this layout — an older release stored many timestamped
+sessions per directory — is not rewritten or deleted. The newest of them is
+adopted as that directory's conversation on first use, so an existing
+conversation carries over; the rest stay where they are and can be opened with
+`--session`.
+
+### 5.2 Saving
+
+Every message is written when it enters the conversation, not at exit: an
+assistant answer, a tool result, a compaction, a rename. A crash, a `kill -9`, or
+closing the terminal therefore loses at most the turn that was in flight — the
+turns before it are already on disk. Two consequences are visible and worth
+stating:
+
+- Text streamed during a turn is not saved incrementally; the finished assistant
+  message is saved when the turn completes. A process killed mid-answer keeps the
+  completed turns, not the partial text.
+- A finished turn is durable even though the process is still running, so a
+  second terminal, or a restart, reads the same conversation.
+
+### 5.3 Choosing the directory
+
+`sal` uses the working directory it was started in. Two flags name another one:
+
+| Flag | Effect |
+|---|---|
+| `--dir <path>` | Run with `<path>` as the working directory, and therefore as the conversation's identity. The tools are rooted there too. |
+| `sal --new` | Start over in the current directory: the stored session is moved aside (never deleted) and a fresh one begins. |
+
+`/new` inside a console does the same, and needs the directory to be named when
+the console may be showing another one: `/new <path>` switches to the session
+stored for `<path>`, creating it when there is none. `/new` with no argument
+resets the current directory's conversation.
+
+### 5.4 What a stored session carries
+
+Each session has an id (16 hex characters, shown as its first 8), a display name
+(`--name`/`name`, default the id prefix), a model, the working directory, a
+message count and an update time. A compacted session says so, because its
+active context is shorter than its file.
+
+### 5.5 Commands
 
 | Command | Effect |
 |---|---|
-| `sal -c`, `sal --continue` | Resume the most recent session for this directory; if there is none, start a fresh one (so `sal --web -c` works on a first run). |
-| `sal --continue-all` | Same, but across every session recorded on the machine. |
-| `sal --session <file>` | Open a specific session file by path. |
-| `sal --list-sessions` | Print the stored conversations for this directory, newest first, with their ids, name, model, message count and time, and the resume command. |
-
-### 5.3 Switching inside a running console
-
-Both the terminal UI and the web console can switch conversations without a
-restart:
-
-- `/switch` opens a picker of the sessions stored for the directory, newest
-  first (the current one is hidden in the terminal picker, flagged in the web
-  menu). `↑`/`↓`/`j`/`k` choose, `enter` opens, `esc` cancels, and a digit jumps
-  to that entry; the terminal list is windowed to the terminal height and its
-  entries are clipped so a narrow or short terminal does not overflow.
-- `/switch <id>` opens one directly; `/sessions` lists them.
-- Switching aborts a run in flight and drops its queue, then replays the
-  conversation it switched to. Tool output is not part of the stored history, so
-  a replayed transcript shows tool calls without their results, plus a note of
-  how many messages were restored.
+| `sal` | Continue this directory's conversation, starting one if there is none. |
+| `sal --new` | Move the stored session aside and start fresh. |
+| `sal --dir <path>` | Continue (or start) the conversation for `<path>`. |
+| `sal --session <file>` | Open a specific file, for recovery or inspection. |
+| `sal --list-sessions` | Print every stored conversation on the machine, with its directory. |
+| `/session` | Describe the current session: id, directory, file, message count. |
+| `/new [path]` | Start over here, or continue `<path>`'s conversation. |
 
 ## 6. Commands and configuration
 
 ### 6.1 Slash commands
 
-Available in the terminal UI and the web console (the web console's `/quit`
-explains that closing the tab is how to stop it):
+In the terminal UI and the browser console:
 
 ```
-/help  /model [name]  /new  /session  /switch [id]  /sessions  /tools
+/help  /model [name]  /new [path]  /session  /tools
 /context [summary]  /compact [notes]  /clear  /quit
 ```
 
-- `/model` shows the current model; `/model <name>` switches it for the rest of
-  the process when the provider supports it.
-- `/new` clears the conversation and starts a fresh session file.
-- `/session` describes the current session (id, file, message count).
-- `/tools` lists the enabled tools.
-- `/context` prints the context-window breakdown and where the limit came from;
-  `/context summary` prints the active summary.
-- `/compact [instructions]` replaces older messages with a summary now; during a
-  run it is queued after the current turn.
-- `/clear` empties the visible transcript without touching the conversation.
+`/model <name>` switches the model for the rest of the process; `/session`
+describes the current session; `/context` explains the context figure and
+`/context summary` prints the active summary; `/compact [notes]` compacts now
+(queueing it if a turn is in flight); `/clear` empties the transcript without
+touching the conversation. `/new` is in §5.3. `/quit` closes the terminal UI;
+in the browser, closing the tab is the equivalent.
 
-### 6.2 Configuration resolution
+### 6.2 Resolution
 
-Every setting resolves with the precedence **flag > environment > config file >
-default**, and `--show-config` prints the resolved value and its source for each
-one (credentials masked). `sal --version` prints the version.
+Every setting resolves as **flag > environment > config file > default**, and
+`--show-config` prints each resolved value with its source, credentials masked.
+`sal --version` prints the version.
 
 ### 6.3 Config file
 
-TOML at `$XDG_CONFIG_HOME/sal/config.toml`, with JSON also accepted as
-`config.json` in the same directory (TOML wins if both exist). `--config <path>`
-or `$SAL_CONFIG` selects a specific file. Keys use snake_case and mirror the
-flag names:
+TOML at `$XDG_CONFIG_HOME/sal/config.toml`, JSON accepted as `config.json` (TOML
+wins); `--config` or `$SAL_CONFIG` names a file. Keys mirror the flag names:
 
 ```toml
 provider       = "openai"        # the protocol; the URL picks the service
@@ -335,8 +250,8 @@ tools          = "read,bash,edit,write,grep,find,ls"
 max_turns      = 32
 max_retries    = 4               # 0 = default, negative = never retry
 context_window = 0               # 0 = resolve it; accepts "128k", "1m"
-auto_compact   = true            # summarize older messages when the window fills
-compact_at     = 80              # percent of the window that triggers it
+auto_compact   = true
+compact_at     = 80
 system_prompt        = ""        # text, or a path to a file
 append_system_prompt = ""
 session_dir    = ""              # default $XDG_DATA_HOME/sal/sessions
@@ -346,53 +261,43 @@ no_session      = false
 no_context_files = false
 ```
 
-Unknown keys are reported as warnings rather than ignored silently, and a config
-file that contains an `api_key` while being readable by other users produces a
-permissions warning.
+Unknown keys are warnings, not errors, and an `api_key` in a file readable by
+other users produces a permissions warning.
 
 ### 6.4 Credentials and environment
 
-`api_key_env` names the environment variable holding the key (checked before
-`SAL_API_KEY`/`OPENAI_API_KEY`), so the secret stays in one place; a literal
-`api_key` is the last resort and `--api-key` overrides everything.
+`api_key_env` names a variable to read the key from, checked before the generic
+aliases; `--api-key` overrides everything.
 
 ```
-SAL_API_KEY / OPENAI_API_KEY          credentials
-SAL_BASE_URL / OPENAI_BASE_URL / OPENAI_API_BASE   endpoint
-SAL_MODEL / OPENAI_MODEL              model
-SAL_CONFIG                            config file path
-SAL_SESSION_DIR                       session storage root
-SAL_WEB_TOKEN                         access token for --web
-XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME   base directories
+SAL_API_KEY / OPENAI_API_KEY                      credentials
+SAL_BASE_URL / OPENAI_BASE_URL / OPENAI_API_BASE  endpoint
+SAL_MODEL / OPENAI_MODEL                          model
+SAL_CONFIG                                        config file path
+SAL_SESSION_DIR                                   session storage root
+SAL_WEB_TOKEN                                     access token for --web
+XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME  base directories
 ```
 
-`SAL_*` wins over the `OPENAI_*` aliases. Relative values in the `XDG_*`
-variables are ignored, as the specification requires.
+`SAL_*` wins over the `OPENAI_*` aliases; relative `XDG_*` values are ignored.
 
 ### 6.5 Gateway identity
 
-sal always sends `User-Agent: sal/<version>`, and sends a per-conversation
-session id header when the endpoint is known to want one — currently
-`x-opencode-session` for `opencode.ai`. `session_header` in the config file
-names a different header, or `""` keeps the automatic choice. The id is the
-conversation's session id, so `-c` keeps the same routing affinity; a run with a
-stored session uses that session's id, and a run without one uses a fresh
-random id.
+Every request carries `User-Agent: sal/<version>`, plus a per-conversation
+header when the endpoint wants one (`x-opencode-session` on `opencode.ai`, or
+whatever `session_header` names). The id is the session's, so continuing a
+conversation keeps the routing affinity.
 
 ### 6.6 System prompt and context files
 
-The default system prompt describes sal, its working directory, the OS/arch and
-the date, and gives the model its working guidelines. `--system-prompt` replaces
-it (a value naming an existing file is read from disk);
-`--append-system-prompt` adds to it.
+The default prompt describes sal, the working directory, the OS/arch and the
+date. `--system-prompt` replaces it (a value naming an existing file is read from
+disk); `--append-system-prompt` adds to it.
 
-Unless `--no-context-files` is given, instruction files are discovered and
-appended:
-
-1. `AGENTS.md` or `CLAUDE.md` in `$XDG_CONFIG_HOME/sal` (the first that exists).
-2. For each directory from the filesystem root down to the working directory,
-   the first of `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md` that exists — one
-   file per directory, so the working directory's file wins.
+Unless `--no-context-files` is given, instruction files are appended: `AGENTS.md`
+or `CLAUDE.md` in `$XDG_CONFIG_HOME/sal`, then for each directory from the root
+down to the working directory, the first of `AGENTS.override.md`, `AGENTS.md`,
+`CLAUDE.md` that exists.
 
 ## 7. Documentation and developer-facing behaviour
 
@@ -428,10 +333,9 @@ Not implemented, deliberately, and not to be added without a design change:
 - Upgrading from inside sal's interfaces: `sal upgrade` is a command of its own,
   specified in `design/features/self-upgrade`, and it is not a tool, a slash
   command or an event.
-- Session-tree navigation (`/tree`, `/fork`, `/clone`) or HTML export. Sessions
-  are linear and resumable only. (Compaction is not an exception to this: it
-  changes what the model is sent, not the session tree, and the log stays
-  complete — see `design/features/context-management`.)
+- Multiple conversations per directory, `/switch`, `/fork`, `/clone`, session
+  trees, or HTML export. A directory has one conversation. (Compaction is not an
+  exception: it changes what the model is sent, not the stored log.)
 - Prompt caching and cost accounting. The context window is tracked
   approximately (see `design/features/context-management`): no bundled
   tokenizer, and a small built-in table of model windows rather than a vendor
