@@ -22,6 +22,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Two sal processes starting in the same directory can no longer become two
+  conversations.** The session file is created exclusively, and the process
+  that loses the race opens the conversation the other one created instead of
+  writing a second header into the same file.
+- **A file with no session header is not treated as a conversation.** An
+  interrupted first write can leave `session.jsonl` empty; opening it now starts
+  the directory's conversation properly rather than resuming an entry with no
+  id and no recorded directory. Such leftovers are also left out of
+  `--list-sessions`.
+- `--list-sessions` no longer offers a conversation `--new` moved aside; the
+  archive stays on disk but is not the directory's entry.
 - A restart no longer appears to lose the conversation. The session is written
   as each message is appended, so finished turns are on disk before the process
   exits; the earlier behaviour required `-c` to find them again.

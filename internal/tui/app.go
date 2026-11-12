@@ -18,7 +18,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bothought/sal/internal/agent"
-	"github.com/bothought/sal/internal/session"
 )
 
 // Agent is the slice of *agent.Agent the TUI drives. Keeping it an interface
@@ -50,16 +49,14 @@ type Options struct {
 	InitialPrompt string
 	// SessionInfo describes the current session (/session command).
 	SessionInfo func() string
-	// SessionID reports the id of the current session, used to keep the
-	// switcher from offering the session that is already showing.
+	// SessionID reports the id of the current session, so a turn that finished
+	// after the console moved on can be told apart from the current one.
 	SessionID func() string
-	// NewSession starts a fresh session file and returns its description.
+	// NewSession starts this directory over and returns a description.
 	NewSession func() (string, error)
-	// ListSessions reports the stored sessions that can be switched to.
-	ListSessions func() []session.Info
-	// OpenSession switches to a stored session by id and returns its
-	// description.
-	OpenSession func(id string) (string, error)
+	// OpenSession switches to another directory's conversation ("" = the one
+	// the console started in) and returns a description.
+	OpenSession func(dir string) (string, error)
 }
 
 // Block kinds in the transcript.
@@ -108,11 +105,6 @@ type Model struct {
 	lastErr   error
 	status    string
 	startedAt time.Time
-
-	// Session switcher state (/switch, /sessions).
-	picking  bool
-	choices  []session.Info
-	selected int
 }
 
 type eventMsg agent.Event
@@ -161,7 +153,7 @@ func startupText(opts Options) string {
 		b.WriteString("\ntools: " + strings.Join(tools, ", "))
 	}
 	b.WriteString("\nenter submit · alt+enter newline · esc abort · pgup/pgdn scroll · ctrl+c quit")
-	b.WriteString("\n/help /model /new /session /switch /sessions /tools /context /compact /clear /quit")
+	b.WriteString("\n/help /model /new /session /tools /context /compact /clear /quit")
 	return b.String()
 }
 
@@ -302,9 +294,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.picking {
-		return m.handlePickerKey(msg)
-	}
 	switch msg.String() {
 	case "ctrl+c":
 		if m.running && m.cancel != nil {
@@ -365,129 +354,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
 	return m, cmd
-}
-
-// handlePickerKey drives the session switcher: navigation, selection and cancel.
-func (m *Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "up", "k", "shift+tab":
-		if len(m.choices) > 0 {
-			m.selected = (m.selected - 1 + len(m.choices)) % len(m.choices)
-		}
-	case "down", "j", "tab":
-		if len(m.choices) > 0 {
-			m.selected = (m.selected + 1) % len(m.choices)
-		}
-	case "enter":
-		m.pickSession()
-	case "esc":
-		m.picking = false
-	case "ctrl+c":
-		return m, tea.Quit
-	default:
-		// A digit jumps straight to the matching entry.
-		if len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '9' {
-			if i := int(msg.Runes[0] - '1'); i < len(m.choices) {
-				m.selected = i
-				m.pickSession()
-			}
-		}
-	}
-	m.layout()
-	m.refresh()
-	return m, nil
-}
-
-// openPicker collects the stored sessions and shows the switcher.
-func (m *Model) openPicker() {
-	if m.opts.ListSessions == nil || m.opts.OpenSession == nil {
-		m.addBlock(kindSystem, "sessions", "sessions are disabled (--no-session)")
-		return
-	}
-	// A session switch aborts the turn in flight; the queue from the old
-	// conversation goes with it. Marking it as an abort keeps the picker from
-	// closing on a "run failed" notice the cancelled turn would otherwise add.
-	if m.running && m.cancel != nil {
-		m.aborting = true
-		m.cancel()
-		m.queued = nil
-	}
-	infos := m.opts.ListSessions()
-	current := m.sessionID()
-	choices := make([]session.Info, 0, len(infos))
-	for _, info := range infos {
-		if info.ID == current {
-			continue // already showing it; an empty list keeps the picker hidden
-		}
-		choices = append(choices, info)
-	}
-	m.choices = choices
-	m.selected = 0
-	if len(choices) == 0 {
-		if len(infos) == 0 {
-			m.addBlock(kindSystem, "sessions", "no other sessions stored for this directory")
-		} else {
-			m.addBlock(kindSystem, "sessions", "no other sessions stored (this is the only one)")
-		}
-		return
-	}
-	m.picking = true
-}
-
-// pickSession switches to the highlighted session.
-func (m *Model) pickSession() {
-	if m.selected < 0 || m.selected >= len(m.choices) {
-		return
-	}
-	id := m.choices[m.selected].ID
-	m.picking = false
-	m.choices = nil
-	m.switchTo(id)
-}
-
-// switchTo opens the stored session with the given id (or id prefix) and
-// replays its conversation into the transcript.
-func (m *Model) switchTo(id string) {
-	if m.opts.OpenSession == nil {
-		m.addBlock(kindSystem, "sessions", "sessions are disabled (--no-session)")
-		return
-	}
-	// A switch aborts the turn in flight; its queue belonged to the session
-	// that is being left. It is marked as an abort so the run's cancellation
-	// is not reported as a failure of the session being opened.
-	if m.running && m.cancel != nil {
-		m.aborting = true
-		m.cancel()
-		m.queued = nil
-	}
-	desc, err := m.opts.OpenSession(id)
-	if err != nil {
-		m.addBlock(kindError, "switch session", err.Error())
-		return
-	}
-	if desc != "" {
-		desc = " " + desc
-	}
-	m.blocks = nil
-	m.turns = 0
-	m.usageIn, m.usageOut = 0, 0
-	m.cur, m.curTool = -1, -1
-	m.lastErr = nil
-	// The indicator is recomputed from the restored context, marked `~` until
-	// the next response measures it.
-	if m.opts.Agent != nil {
-		m.ctx = m.opts.Agent.ContextInfo()
-	}
-	m.replayHistory()
-	m.addBlock(kindSystem, "switched session", "showing session "+shortID(id)+desc)
-}
-
-// shortID renders a session id the way the file names and listings do.
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
 }
 
 // finishRun clears the working state, reports a failure, and starts the next
@@ -649,25 +515,23 @@ func (m *Model) handleCommand(text string) {
 			m.addBlock(kindError, "model", "this provider cannot switch models at runtime")
 		}
 	case "new":
-		m.opts.Agent.Reset()
-		// The indicator resets with the conversation, and no summary carries
-		// over.
-		m.ctx = m.opts.Agent.ContextInfo()
-		m.blocks = nil
-		m.turns = 0
-		m.usageIn, m.usageOut = 0, 0
-		m.queued = nil
-		m.cur, m.curTool = -1, -1
-		m.lastErr = nil
+		// With a directory, /new continues that directory's conversation; with
+		// none, it starts this one over.
+		if len(args) > 0 {
+			m.openDirectory(strings.Join(args, " "))
+			return
+		}
+		m.resetConversation()
 		desc := ""
 		if m.opts.NewSession != nil {
 			if d, err := m.opts.NewSession(); err != nil {
 				m.addBlock(kindError, "new session", err.Error())
+				return
 			} else {
 				desc = d
 			}
 		}
-		m.addBlock(kindSystem, "new session", "conversation cleared "+desc)
+		m.addBlock(kindSystem, "new session", "started over "+desc)
 	case "context":
 		// The figures the console holds, not a fresh read of the agent: a run
 		// in flight is mutating it, and the event stream has kept m.ctx current.
@@ -701,13 +565,7 @@ func (m *Model) handleCommand(text string) {
 			info = m.opts.SessionInfo()
 		}
 		m.addBlock(kindSystem, "session", info)
-	case "switch", "sessions", "resume":
-		if len(args) > 0 {
-			m.switchTo(args[0])
-		} else {
-			m.openPicker()
-		}
-		m.layout()
+
 	case "tools":
 		m.addBlock(kindSystem, "tools", strings.Join(m.opts.Agent.ToolNames(), ", "))
 	case "clear":
@@ -723,10 +581,8 @@ func helpText() string {
 	return `commands:
   /help              show this help
   /model [name]      show or switch the model
-  /new               start a new session
+  /new [dir]         start this directory over, or continue another's
   /session           show the current session
-  /switch [id]       switch to a stored session (no id opens a picker)
-  /sessions          list the stored sessions for this directory
   /tools             list enabled tools
   /context [summary] show the context window, or the active summary
   /compact [notes]   summarize older messages to free context
@@ -735,10 +591,65 @@ func helpText() string {
 keys:
   enter              submit (queues while the agent is working)
   alt+enter          newline
-  esc                abort the current run, or cancel the switcher
-  ↑/↓                choose a session in the switcher (enter opens it)
+  esc                abort the current run
   pgup/pgdn          scroll the transcript
   ctrl+c             quit`
+}
+
+// resetConversation clears the agent's conversation and the console. It is what
+// starting over needs; a console that is instead switching to an existing
+// conversation clears only its own state (see clearTranscript).
+func (m *Model) resetConversation() {
+	m.opts.Agent.Reset()
+	// The indicator resets with the conversation, and no summary carries over.
+	m.ctx = m.opts.Agent.ContextInfo()
+	m.clearTranscript()
+}
+
+// clearTranscript drops the visible transcript and the per-conversation
+// counters, leaving the agent's conversation alone.
+func (m *Model) clearTranscript() {
+	m.blocks = nil
+	m.turns = 0
+	m.usageIn, m.usageOut = 0, 0
+	m.queued = nil
+	m.cur, m.curTool = -1, -1
+	m.lastErr = nil
+}
+
+// openDirectory switches the console to another directory's conversation and
+// replays it into the transcript.
+func (m *Model) openDirectory(dir string) {
+	if m.opts.OpenSession == nil {
+		m.addBlock(kindSystem, "session", "sessions are disabled (--no-session)")
+		return
+	}
+	// Opening another conversation aborts the turn in flight; its queue belonged
+	// to the conversation being left. Marking it as an abort keeps the
+	// cancellation from being reported as a failure of the one being opened.
+	if m.running && m.cancel != nil {
+		m.aborting = true
+		m.cancel()
+		m.queued = nil
+	}
+	desc, err := m.opts.OpenSession(dir)
+	if err != nil {
+		m.addBlock(kindError, "session", err.Error())
+		return
+	}
+	// Clear the console without touching the agent: OpenSession has already
+	// installed the new conversation in it, and resetting would discard it.
+	m.clearTranscript()
+	if m.opts.Agent != nil {
+		m.ctx = m.opts.Agent.ContextInfo()
+	}
+	m.replayHistory()
+	msg := "showing " + shortenHome(dir)
+	if desc != "" {
+		msg += " " + desc
+	}
+	m.addBlock(kindSystem, "session", msg)
+	m.refresh()
 }
 
 func (m *Model) addBlock(kind, title, body string) {
@@ -774,51 +685,9 @@ func summarizeArgs(raw string) string {
 	return truncate(strings.ReplaceAll(raw, "\n", " "), 60)
 }
 
-// pickerWindow is how many sessions fit in the picker, given the terminal
-// height. A picker that does not fit would push the footer off the screen.
-func (m *Model) pickerWindow() int {
-	// Header (1) + picker border (2) + heading (1) + summary (1) + footer (1).
-	room := m.height - 6
-	if room > pickerMax {
-		room = pickerMax
-	}
-	if room < 1 {
-		room = 1
-	}
-	return room
-}
-
-// pickerLines counts what viewPicker renders, for layout.
-func (m *Model) pickerLines() int {
-	start, end := m.pickerRange()
-	lines := 1 + (end - start) + 2 // heading + entries + border
-	if start > 0 || end < len(m.choices) {
-		lines++
-	}
-	return lines
-}
-
-// pickerRange is the slice of choices the window shows.
-func (m *Model) pickerRange() (start, end int) {
-	window := m.pickerWindow()
-	if m.selected >= window {
-		start = m.selected - window + 1
-	}
-	end = start + window
-	if end > len(m.choices) {
-		end = len(m.choices)
-	}
-	return start, end
-}
-
 func (m *Model) layout() {
 	editorHeight := m.ta.Height() + 2 // textarea + border
 	avail := m.height - editorHeight - 3
-	if m.picking {
-		// While picking, the transcript steps aside: the picker needs the room
-		// and a short transcript viewport is a small price for a list that fits.
-		avail = 1
-	}
 	if avail < 1 {
 		avail = 1
 	}
@@ -852,15 +721,9 @@ func (m *Model) View() string {
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(
 		"  " + shortenHome(m.opts.Cwd)))
 	b.WriteString("\n")
-	if m.picking {
-		// The picker replaces the transcript: it needs the vertical room, and
-		// a wrapped list would overflow the terminal.
-		b.WriteString(m.viewPicker())
-	} else {
-		b.WriteString(m.vp.View())
-		b.WriteString("\n")
-		b.WriteString(m.viewEditor())
-	}
+	b.WriteString(m.vp.View())
+	b.WriteString("\n")
+	b.WriteString(m.viewEditor())
 	b.WriteString("\n")
 	b.WriteString(m.footer())
 	return b.String()
@@ -877,80 +740,6 @@ func (m Model) viewEditor() string {
 		BorderForeground(lipgloss.Color(borderColor)).
 		Width(m.width - 2).
 		Render(m.ta.View())
-}
-
-// pickerMax is how many sessions are shown at once; the list scrolls when the
-// directory has more.
-const pickerMax = 8
-
-// viewPicker renders the session switcher in place of the editor.
-func (m Model) viewPicker() string {
-	// The border and its padding take four columns; entries are clipped to what
-	// is left, otherwise a narrow terminal wraps them and the box overflows.
-	inner := m.width - 4
-	if inner < 10 {
-		inner = 10
-	}
-	clip := func(s string) string {
-		r := []rune(s)
-		if len(r) <= inner {
-			return s
-		}
-		if inner <= 1 {
-			return string(r[:inner])
-		}
-		return string(r[:inner-1]) + "…"
-	}
-
-	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).
-		Render(clip("switch session  (↑/↓ choose · enter open · esc cancel)"))}
-
-	start, end := m.pickerRange()
-	current := m.sessionID()
-	for i := start; i < end; i++ {
-		info := m.choices[i]
-		text := sessionLabel(info)
-		if info.ID == current {
-			text += "  (current)"
-		}
-		if i == m.selected {
-			lines = append(lines, lipgloss.NewStyle().
-				Bold(true).Foreground(lipgloss.Color("39")).
-				Render(clip("› "+text)))
-		} else {
-			lines = append(lines, clip("  "+text))
-		}
-	}
-	if start > 0 || end < len(m.choices) {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).
-			Render(clip(fmt.Sprintf("  %d–%d of %d", start+1, end, len(m.choices)))))
-	}
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("205")).
-		Width(m.width - 2).
-		Render(strings.Join(lines, "\n"))
-}
-
-// sessionLabel describes a stored session in one line: its short id, why it is
-// recognisable, and how much conversation it holds.
-func sessionLabel(info session.Info) string {
-	name := strings.TrimSpace(info.Name)
-	short := shortID(info.ID)
-	if short == "" {
-		short = "?"
-	}
-	body := fmt.Sprintf("%s · %d msgs · %s",
-		info.Model, info.Messages, info.UpdatedAt.Format("01-02 15:04"))
-	if info.Compacted {
-		// The active context is a summary, so the file holds more than the
-		// console will replay.
-		body += " · compacted"
-	}
-	if name == "" || name == short {
-		return fmt.Sprintf("%s  %s", short, body)
-	}
-	return fmt.Sprintf("%s  %s · %s", short, name, body)
 }
 
 func (m Model) footer() string {

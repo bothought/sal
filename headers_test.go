@@ -204,10 +204,12 @@ session_header = "x-opencode-session"
 	}
 	firstID := mock.headers[0].Get("x-opencode-session")
 
+	// A directory has one conversation, so a second run continues it without a
+	// flag; the routing affinity must follow.
 	if _, err := captureStdout(t, func() error {
-		return runWithArgs([]string{"-c", "-p", "second"})
+		return runWithArgs([]string{"-p", "second"})
 	}); err != nil {
-		t.Fatalf("resume failed: %v", err)
+		t.Fatalf("continuation failed: %v", err)
 	}
 	last := mock.headers[len(mock.headers)-1]
 	secondID := last.Get("x-opencode-session")

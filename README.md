@@ -210,8 +210,10 @@ turn in flight.
 $ sal --list-sessions
 2 conversation(s) on this machine:
 
-  /work/project    9f2c1ab4  12 msgs  11-05 14:05
-  /work/other      3d1e77aa   3 msgs  11-05 13:58
+  ~/src/project                           12 msgs · 2026-11-05 14:05 — the parser
+  ~/src/other                              3 msgs · 2026-11-05 13:58
+
+use --dir <path> to work on one of them
 ```
 
 `--new` moves the stored conversation aside (never deletes it) and starts fresh;
@@ -258,14 +260,17 @@ The console is built to be reloaded while the agent keeps working:
   is restarted — reload it and it reconnects to the new process. Override with
   `--web-token` or `$SAL_WEB_TOKEN` (both are for development; a fixed token is
   worth no more than its exposure).
-- **The session is in the URL.** Loading a URL whose `session` differs from the
-  current one reopens that stored session and rebuilds the transcript from it,
-  so a reload — or a tab left open across a restart — shows the whole
-  conversation again, marked with a `restored` note. `/new` rewrites the URL, so
-  the address bar always names the session the tab is showing.
+- **The session is in the URL.** A reload rebuilds the transcript from the
+  conversation the server is serving, marked with a `restored` note; `/new`
+  rewrites the URL so the address bar always names the session the tab is
+  showing. A directory has one conversation, so a URL cannot select a different
+  one: a tab that outlived a restart keeps serving the directory's conversation,
+  and a `session` that no longer matches only produces a note on stderr rather
+  than silently swapping the conversation.
 - **A restarted process continues the directory's conversation**, so a
   rebuild-and-reload loop needs no extra flag and an open tab finds the same
-  conversation either way.
+  conversation either way. Starting sal prints `sal: continuing <path>` to
+  stderr when it resumed one.
 
 Restoring the transcript reads the session's messages; tool output comes back
 whole, while per-call durations are not part of the session file and are lost
