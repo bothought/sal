@@ -183,9 +183,11 @@ func Path(root, cwd string) string {
 // existing conversation there is not touched; callers that mean "start over"
 // move it aside first (see Archive).
 //
-// The file is created exclusively: two processes starting in the same
-// directory at the same moment cannot both become its conversation, the loser
-// is told the file exists and opens it instead (see Open).
+// The file is claimed exclusively, so two processes starting in the same
+// directory at the same moment cannot both become its conversation: the loser
+// is told the file exists and opens what the winner created (see Open). The
+// header follows immediately; a reader that finds the file before it is written
+// waits for it, which is why no path reports a conversation without one.
 func New(root, cwd, name, model string) (*Session, error) {
 	dir := ProjectDir(root, cwd)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -195,28 +197,28 @@ func New(root, cwd, name, model string) (*Session, error) {
 	id := newID()
 	path := Path(root, cwd)
 
-	s := &Session{ID: id, Name: name, Cwd: abs, Model: model, Path: path}
-	if err := s.create(); err != nil {
-		return nil, err
-	}
 	header := Entry{Type: "session", ID: newID(), Timestamp: now(), SessionID: id, Cwd: abs, Model: model, Name: name}
-	if _, err := s.write(header); err != nil {
-		_ = s.file.Close()
-		s.file = nil
+	data, err := json.Marshal(header)
+	if err != nil {
 		return nil, err
 	}
-	s.recorded = true
-	return s, nil
-}
-
-// create makes the session file, refusing one that already exists.
-func (s *Session) create() error {
-	f, err := os.OpenFile(s.Path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	s.file = f
-	return nil
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		_ = f.Close()
+		// Nothing was recorded, so the name is not a conversation: give it back
+		// rather than leave a file that reads as a header-less leftover.
+		_ = os.Remove(path)
+		return nil, err
+	}
+
+	s := &Session{ID: id, Name: name, Cwd: abs, Model: model, Path: path, file: f, lastID: header.ID, recorded: true}
+	if ts, perr := time.Parse(time.RFC3339Nano, header.Timestamp); perr == nil {
+		s.UpdatedAt = ts
+	}
+	return s, nil
 }
 
 func (s *Session) open() error {
@@ -400,11 +402,20 @@ func Open(root, cwd, name, model string) (*Session, bool, error) {
 			return nil, false, err
 		}
 		if !s.recorded {
-			// The file exists but holds no session header: its creation was
-			// interrupted before the header was written. It is a leftover, not
-			// a conversation, so drop it and create the conversation properly
-			// rather than resuming an id printed from a file name.
-			if err := os.Remove(path); err != nil {
+			// The file holds no header. Either another sal claimed it a moment
+			// ago and is writing the header, or an interrupted write left it
+			// behind. A fresh file is given time to gain its header; an older
+			// one is a leftover, not a conversation, and is replaced rather than
+			// resumed as an id printed from a file name.
+			if fi, serr := os.Stat(path); serr == nil && time.Since(fi.ModTime()) < headerWait {
+				if s, ok := waitForHeader(path); ok {
+					if err := s.open(); err != nil {
+						return nil, false, err
+					}
+					return s, true, nil
+				}
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return nil, false, err
 			}
 		} else {
@@ -431,18 +442,37 @@ func Open(root, cwd, name, model string) (*Session, bool, error) {
 		// A concurrent sal in the same directory won the creation. Its file is
 		// the directory's conversation now, so open that instead of failing.
 		if errors.Is(err, fs.ErrExist) {
-			s, lerr := Load(path)
-			if lerr != nil {
-				return nil, false, lerr
+			if s, ok := waitForHeader(path); ok {
+				if oerr := s.open(); oerr != nil {
+					return nil, false, oerr
+				}
+				return s, true, nil
 			}
-			if oerr := s.open(); oerr != nil {
-				return nil, false, oerr
-			}
-			return s, true, nil
 		}
 		return nil, false, err
 	}
 	return s, false, nil
+}
+
+// headerWait is how long a just-created file is given to gain its header, and
+// how old a header-less file must be before it counts as a leftover. Writing
+// the header follows the claim immediately, so this only ever waits out a
+// concurrent creation.
+const headerWait = 2 * time.Second
+
+// waitForHeader reads path until it holds a session header, reporting the
+// session and whether one arrived before headerWait elapsed.
+func waitForHeader(path string) (*Session, bool) {
+	deadline := time.Now().Add(headerWait)
+	for {
+		if s, err := Load(path); err == nil && s.recorded {
+			return s, true
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // newestLegacy returns the most recently written session file in dir that is not

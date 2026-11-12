@@ -23,9 +23,10 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 
 - **Two sal processes starting in the same directory can no longer become two
-  conversations.** The session file is created exclusively, and the process
-  that loses the race opens the conversation the other one created instead of
-  writing a second header into the same file.
+  conversations.** The session file is claimed exclusively and its header is
+  written at once, and the process that loses the race opens the conversation
+  the other one created instead of writing a second header into the same file.
+  A reader that finds the file before the header is on disk waits for it.
 - **A file with no session header is not treated as a conversation.** An
   interrupted first write can leave `session.jsonl` empty; opening it now starts
   the directory's conversation properly rather than resuming an entry with no
