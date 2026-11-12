@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bothought/sal/internal/agent"
 )
@@ -459,7 +460,9 @@ func TestOpenAdoptsThePreviousLayout(t *testing.T) {
 
 // TestEmptyFileIsNotAConversation covers a session file whose creation was
 // interrupted before the header was written: the leftover must not be resumed
-// as a conversation with no id and no directory.
+// as a conversation with no id and no directory. Only a file that has sat
+// header-less counts as one; a file created just now may still be getting its
+// header from another process.
 func TestEmptyFileIsNotAConversation(t *testing.T) {
 	root := t.TempDir()
 	cwd := t.TempDir()
@@ -468,6 +471,11 @@ func TestEmptyFileIsNotAConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An interrupted write is old by the time anyone starts sal there.
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
 
@@ -510,6 +518,13 @@ func TestConcurrentCreatesLeaveOneConversation(t *testing.T) {
 	}
 	wg.Wait()
 
+	// Close whatever was opened, even when the assertions below fail: an open
+	// handle keeps the temporary directory from being removed on Windows.
+	for _, s := range sessions {
+		if s != nil {
+			defer s.Close()
+		}
+	}
 	ids := map[string]bool{}
 	for i, err := range errs {
 		if err != nil {
@@ -580,5 +595,40 @@ func TestArchiveIsNotListed(t *testing.T) {
 	}
 	if infos[0].Name != "the new one" {
 		t.Fatalf("listed the wrong conversation: %+v", infos[0])
+	}
+}
+
+// TestOpenWaitsForAHeaderBeingWritten covers the moment between one process
+// claiming the session file and writing its header: a second process that opens
+// it then must end up in the same conversation, not in a header-less leftover.
+func TestOpenWaitsForAHeaderBeingWritten(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+	path := Path(root, cwd)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The claim: the file exists, empty, as New leaves it for an instant.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := `{"type":"session","id":"h","timestamp":"` + now() + `","sessionId":"thefirst"}` + "\n"
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_, _ = f.WriteString(header)
+		_ = f.Close()
+	}()
+
+	s, resumed, err := Open(root, cwd, "second", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if !resumed {
+		t.Fatal("the second opener should join the conversation being created")
+	}
+	if s.ID != "thefirst" {
+		t.Fatalf("joined %q, want the conversation being written", s.ID)
 	}
 }
