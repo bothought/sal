@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/bothought/sal/internal/agent"
-	"github.com/bothought/sal/internal/session"
 )
 
 //go:embed index.html
@@ -95,15 +94,11 @@ type Options struct {
 	// SessionID reports the id of the current session, if any. It is put in the
 	// console URL and in every state snapshot.
 	SessionID func() string
-	// NewSession starts a fresh session file and returns its description.
+	// NewSession starts this directory over and returns a description.
 	NewSession func() (string, error)
-	// ListSessions reports the stored sessions that can be switched to, which
-	// is what the page's session menu offers.
-	ListSessions func() []session.Info
-	// OpenSession switches to a stored session by id and returns its
-	// description. The page URL names the session it was opened in, so
-	// reloading a tab reopens that conversation.
-	OpenSession func(id string) (string, error)
+	// OpenSession switches to another directory's conversation ("" = the one
+	// the console started in) and returns a description.
+	OpenSession func(dir string) (string, error)
 }
 
 // Block is one entry of the transcript shown in the page.
@@ -137,12 +132,11 @@ type outEvent struct {
 	Session  string `json:"session,omitempty"`
 	// SessionID is the current session's id, which the page keeps in its URL.
 	SessionID string `json:"sessionId,omitempty"`
-	// Sessions lists the switchable sessions; sent with "state" snapshots.
-	Sessions []sessionInfo `json:"sessions,omitempty"`
-	Cwd      string        `json:"cwd,omitempty"`
-	Version  string        `json:"version,omitempty"`
-	Tools    []string      `json:"tools,omitempty"`
-	Blocks   []Block       `json:"blocks,omitempty"`
+
+	Cwd     string   `json:"cwd,omitempty"`
+	Version string   `json:"version,omitempty"`
+	Tools   []string `json:"tools,omitempty"`
+	Blocks  []Block  `json:"blocks,omitempty"`
 
 	// Context window figures, sent with status updates and snapshots.
 	CtxUsed   int    `json:"ctxUsed"`
@@ -173,19 +167,6 @@ type outEvent struct {
 	CtxKeepTurns       int `json:"ctxKeepTurns,omitempty"`
 	// Compaction describes the compaction this event reports.
 	Compaction *agent.CompactionInfo `json:"compaction,omitempty"`
-}
-
-// sessionInfo is one entry of the page's session menu.
-type sessionInfo struct {
-	ID        string `json:"id"`
-	Name      string `json:"name,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Messages  int    `json:"messages"`
-	UpdatedAt string `json:"updatedAt,omitempty"`
-	Current   bool   `json:"current,omitempty"`
-	// Compacted marks a session whose active context is a summary, so the menu
-	// explains why it is shorter than its file.
-	Compacted bool `json:"compacted,omitempty"`
 }
 
 // Server holds the console state shared by every connected page.
@@ -356,7 +337,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/clear", s.auth(s.handleClear))
 	mux.HandleFunc("/api/new", s.auth(s.handleNew))
 	mux.HandleFunc("/api/model", s.auth(s.handleModel))
-	mux.HandleFunc("/api/sessions", s.auth(s.handleSessions))
 	mux.HandleFunc("/api/session/open", s.auth(s.handleOpen))
 	mux.HandleFunc("/api/compact", s.auth(s.handleCompact))
 	return mux
@@ -396,49 +376,43 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(page)
 }
 
-// adoptSession switches the console to the session named in the page URL. It is
-// a no-op when that session is already current, when no opener is configured, or
-// while a turn is running.
+// adoptSession accepts the session id a page URL carries, so a tab that outlived
+// a restart is told to reload rather than showing a different conversation
+// silently. A directory has one conversation, so the id can only match or not.
 func (s *Server) adoptSession(id string) {
 	id = strings.TrimSpace(id)
-	if id == "" || s.opts.OpenSession == nil || id == s.SessionID() {
+	if id == "" || s.SessionID() == id {
 		return
 	}
-	if err := s.OpenSession(id); err != nil {
-		fmt.Fprintf(os.Stderr, "sal web: cannot open session %s: %v\n", id, err)
-	}
+	fmt.Fprintf(os.Stderr, "sal web: this page was showing session %s; the console now serves %s\n",
+		id, s.SessionID())
 }
 
-// OpenSession switches the console to another stored session: the agent is
-// rewired to it, the transcript is rebuilt, and every page is sent the new
-// snapshot. A turn in flight is aborted, together with its queued prompts, so
-// the turns of one conversation stay together.
-func (s *Server) OpenSession(id string) error {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return errors.New("no session id given")
-	}
-	if id == s.SessionID() {
-		return nil
-	}
+// OpenSession switches the console to the conversation stored for another
+// directory (or the one it started in, when dir is empty): the agent is rewired,
+// the transcript is rebuilt, and every page is sent the new snapshot. A turn in
+// flight is aborted, together with its queued prompts, so the turns of one
+// conversation stay together.
+func (s *Server) OpenSession(dir string) error {
+	dir = strings.TrimSpace(dir)
 	if s.opts.OpenSession == nil {
 		return errors.New("sessions are disabled")
 	}
 	if running := s.abortForSwitch(); running {
 		// Let the aborted run finish before the history is replaced, so its
-		// remaining events cannot land in the session being opened.
+		// remaining events cannot land in the conversation being opened.
 		for i := 0; i < 500 && s.isRunning(); i++ {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	desc, err := s.opts.OpenSession(id)
+	desc, err := s.opts.OpenSession(dir)
 	if err != nil {
 		return err
 	}
 	s.seedFromHistory()
 	s.mu.Lock()
 	if desc != "" {
-		s.blocks = append(s.blocks, Block{Kind: kindSystem, Body: "switched to session " + desc, Done: true})
+		s.blocks = append(s.blocks, Block{Kind: kindSystem, Body: desc, Done: true})
 	}
 	s.broadcastLocked(s.statusLocked("state"))
 	s.mu.Unlock()
@@ -744,29 +718,20 @@ func humanCount(n int) string {
 	}
 }
 
-// handleSessions answers with the switchable sessions, for a page that wants to
-// refresh the menu without reconnecting its event stream.
-func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	infos := s.sessionsLocked()
-	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": infos})
-}
-
-// handleOpen switches the console to another stored session.
+// handleOpen switches the console to the conversation stored for a directory.
 func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "use POST")
 		return
 	}
 	var body struct {
-		ID string `json:"id"`
+		Dir string `json:"dir"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := s.OpenSession(strings.TrimSpace(body.ID)); err != nil {
+	if err := s.OpenSession(strings.TrimSpace(body.Dir)); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -916,32 +881,8 @@ func (s *Server) statusLocked(evType string) outEvent {
 	ev.SessionID = s.SessionID()
 	if evType == "state" {
 		ev.Blocks = append([]Block(nil), s.blocks...)
-		ev.Sessions = s.sessionsLocked()
 	}
 	return ev
-}
-
-// sessionsLocked builds the page's session menu; callers hold s.mu. The current
-// session is still listed, flagged, so the menu shows where the console is.
-func (s *Server) sessionsLocked() []sessionInfo {
-	if s.opts.ListSessions == nil {
-		return nil
-	}
-	infos := s.opts.ListSessions()
-	current := s.SessionID()
-	out := make([]sessionInfo, 0, len(infos))
-	for _, info := range infos {
-		out = append(out, sessionInfo{
-			ID:        info.ID,
-			Name:      info.Name,
-			Model:     info.Model,
-			Messages:  info.Messages,
-			UpdatedAt: info.UpdatedAt.Format(time.RFC3339),
-			Current:   info.ID == current,
-			Compacted: info.Compacted,
-		})
-	}
-	return out
 }
 
 func (s *Server) snapshotEvent() outEvent {

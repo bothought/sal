@@ -22,8 +22,8 @@ skill, package, and provider-matrix machinery.
   status, context-window use, and token usage.
 - **Four interfaces:** interactive TUI, `--web` browser console, `--print`
   one-shot, and `--mode json` for a machine-readable event stream.
-- **JSONL sessions** with parent links, grouped per working directory, resumable
-  with `-c`.
+- **One conversation per directory**, stored as a JSONL file and continued
+  automatically. Every message is written as it happens.
 - **Context window.** The footer shows `ctx used/limit` for the next request,
   and older messages are summarized automatically when the window fills (or on
   `/compact`), so a long session keeps working.
@@ -144,8 +144,8 @@ themselves and to send a stable per-conversation id. sal always sends
 `User-Agent: sal/<version>`, and sends a session id header when the endpoint is
 known to want one — currently `x-opencode-session` for `opencode.ai`. Set
 `session_header` to name a different header, or to `""` to keep the automatic
-choice. The id is the conversation's session id, so resuming with `-c` keeps the
-same routing affinity; runs with no stored session get a fresh one.
+choice. The id is the conversation's session id, so continuing a conversation
+keeps the same routing affinity; runs with no stored session get a fresh one.
 
 ### Example: a third-party gateway
 
@@ -194,40 +194,35 @@ cat main.go | sal -p "review this"   # pipe into a one-shot run
 sal -p @notes.md "extract the todos" # include a file
 sal --mode json "inspect this repo"  # JSONL event stream
 sal --web                            # browser console on 127.0.0.1:8080
-sal --web -c                         # web console continuing the latest session
-sal -c                               # resume the most recent session here
+sal --dir ~/src/other                # work on another directory's conversation
+sal --new                            # start this directory over
 sal --tools read,grep,find,ls -p "audit this repo"   # read-only run
 ```
 
-### Session switching
+### Sessions
 
-Conversations are stored per working directory, and a running console can switch
-between them without restarting:
-
-- **In the TUI**, `/switch` opens a picker of the sessions stored for the
-  directory (newest first, with the current one flagged); `↑`/`↓` choose, `enter`
-  opens, `esc` cancels, and a digit jumps to that entry. The list is windowed to
-  the terminal height, so it fits at any size. `/switch <id>` opens one directly,
-  and `/sessions` lists them. Switching aborts a turn that is in flight and
-  replays the conversation it switched to (tool output is not part of the
-  history, so those blocks come back as calls without their results).
-- **In the web console**, the menu in the header lists the same sessions; the
-  footer keeps showing the current one. `/switch <id>` and `/sessions` work
-  there too. Because the session id is in the URL, reloading a tab reopens the
-  conversation it was showing.
-- **From the CLI**, `sal --list-sessions` prints the stored conversations with
-  the ids `--session` accepts, and `sal -c` / `sal --continue-all` resume the
-  most recent one for the directory or for the whole machine.
+A working directory owns exactly one conversation. Start sal there and it
+continues; there is nothing to list or switch between, and every message is
+written to disk as it happens, so a crash or a closed terminal loses at most the
+turn in flight.
 
 ```
 $ sal --list-sessions
-2 session(s) for /work/project:
+2 conversation(s) on this machine:
 
-  9f2c1ab4   the first task · 12 msgs · 10-12 14:05
-  3d1e77aa   3 msgs · 10-12 13:58
+  ~/src/project                           12 msgs · 2026-11-05 14:05 — the parser
+  ~/src/other                              3 msgs · 2026-11-05 13:58
 
-resume with: sal --session <id>
+use --dir <path> to work on one of them
 ```
+
+`--new` moves the stored conversation aside (never deletes it) and starts fresh;
+`--dir <path>` works on another directory's conversation; `--session <file>`
+opens a specific file. In a console, `/session` describes the current one and
+`/new [path]` starts over or continues elsewhere.
+
+A conversation written by an older release is adopted: the newest of that
+directory's files becomes the conversation, and the rest stay on disk.
 
 ### Web console
 
@@ -265,15 +260,17 @@ The console is built to be reloaded while the agent keeps working:
   is restarted — reload it and it reconnects to the new process. Override with
   `--web-token` or `$SAL_WEB_TOKEN` (both are for development; a fixed token is
   worth no more than its exposure).
-- **The session is in the URL.** Loading a URL whose `session` differs from the
-  current one reopens that stored session and rebuilds the transcript from it,
-  so a reload — or a tab left open across a restart — shows the whole
-  conversation again, marked with a `restored` note. `/new` rewrites the URL, so
-  the address bar always names the session the tab is showing.
-- **A restarted process starts a fresh session** unless you ask it not to, so
-  for a rebuild-and-reload loop run `sal --web -c`: it reattaches to the most
-  recent session for the directory, and an open tab then finds the same
-  conversation either way.
+- **The session is in the URL.** A reload rebuilds the transcript from the
+  conversation the server is serving, marked with a `restored` note; `/new`
+  rewrites the URL so the address bar always names the session the tab is
+  showing. A directory has one conversation, so a URL cannot select a different
+  one: a tab that outlived a restart keeps serving the directory's conversation,
+  and a `session` that no longer matches only produces a note on stderr rather
+  than silently swapping the conversation.
+- **A restarted process continues the directory's conversation**, so a
+  rebuild-and-reload loop needs no extra flag and an open tab finds the same
+  conversation either way. Starting sal prints `sal: continuing <path>` to
+  stderr when it resumed one.
 
 Restoring the transcript reads the session's messages; tool output comes back
 whole, while per-call durations are not part of the session file and are lost
@@ -306,7 +303,7 @@ retrying, and `0` means the default.
 |---|---|
 | `enter` | submit (queues the message if the agent is working) |
 | `alt+enter` | newline |
-| `esc` | abort the current run, or close the session switcher |
+| `esc` | abort the current run |
 | `pgup`/`pgdn`, `alt+up`/`alt+down` | scroll the transcript |
 | `ctrl+l` | clear the transcript |
 | `ctrl+c` | quit |
@@ -354,9 +351,8 @@ failing silently later.
 ### Slash commands
 
 ```
-/help      /model [name]   /new      /session
-/switch [id]              /sessions /tools
-/context [summary]        /compact [notes]
+/help      /model [name]   /new [path]   /session
+/tools     /context [summary]           /compact [notes]
 /clear     /quit
 ```
 

@@ -1,13 +1,11 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bothought/sal/internal/agent"
 	"github.com/bothought/sal/internal/config"
@@ -309,23 +307,24 @@ func TestValidateResolvedRejectsUnknownProviderFromConfig(t *testing.T) {
 
 // TestListSessionsShowsTheConversationsForTheDirectory covers the CLI half of
 // session switching: the ids printed here are what --session accepts.
-func TestListSessionsShowsTheConversationsForTheDirectory(t *testing.T) {
+// TestListSessionsShowsEveryDirectory pins the machine-wide listing: one line
+// per directory, because a directory has one conversation.
+func TestListSessionsShowsEveryDirectory(t *testing.T) {
 	isolateXDG(t)
 	workdir := t.TempDir()
 	other := t.TempDir()
 
-	first, err := session.New(session.RootWith(""), workdir, "the first task", "m")
+	current, resumed, err := session.Open(session.RootWith(""), workdir, "the first task", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = first.AppendMessage(agent.NewUserMessage("hello"))
-	_ = first.Close()
-
-	second, err := session.New(session.RootWith(""), workdir, "", "m")
-	if err != nil {
+	if resumed {
+		t.Fatal("a fresh directory must not resume")
+	}
+	_ = current.AppendMessage(agent.NewUserMessage("hello"))
+	if err := current.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_ = second.Close()
 
 	elsewhere, err := session.New(session.RootWith(""), other, "another project", "m")
 	if err != nil {
@@ -333,36 +332,30 @@ func TestListSessionsShowsTheConversationsForTheDirectory(t *testing.T) {
 	}
 	_ = elsewhere.Close()
 
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(workdir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(oldWd)
-
 	out, err := captureStdout(t, func() error {
 		return runWithArgs([]string{"--list-sessions"})
 	})
 	if err != nil {
 		t.Fatalf("--list-sessions failed: %v", err)
 	}
-	// Newest first, and only this directory's sessions.
-	if i, j := strings.Index(out, second.ID[:8]), strings.Index(out, first.ID[:8]); i < 0 || j < 0 || i > j {
-		t.Fatalf("expected the newest session first, got:\n%s", out)
-	}
 	if !strings.Contains(out, "the first task") {
 		t.Fatalf("the stored name should be listed:\n%s", out)
 	}
-	if strings.Contains(out, elsewhere.ID[:8]) {
-		t.Fatalf("another directory's session must not be listed:\n%s", out)
+	if !strings.Contains(out, "another project") {
+		t.Fatalf("every directory should be listed:\n%s", out)
 	}
-	if !strings.Contains(out, "sal --session") {
-		t.Fatalf("the listing should say how to resume:\n%s", out)
+	if !strings.Contains(out, "--dir") {
+		t.Fatalf("the listing should say how to reach a conversation:\n%s", out)
+	}
+	// One line per conversation, not one per file.
+	if strings.Count(out, "conversation(s) on this machine") != 1 {
+		t.Fatalf("unexpected listing:\n%s", out)
 	}
 }
 
-// TestContinueAllResumesAnyProjectSession covers the CLI switch that crosses
-// the per-directory grouping.
-func TestContinueAllResumesAnyProjectSession(t *testing.T) {
+// TestDirSelectsAnotherConversation covers --dir: the named directory's
+// conversation is resumed, which is what replaced --continue-all.
+func TestDirSelectsAnotherConversation(t *testing.T) {
 	_, cfgHome, _ := isolateXDG(t)
 	other := t.TempDir()
 	workdir := t.TempDir()
@@ -375,7 +368,7 @@ api_key = "k"
 `)
 
 	// A conversation recorded under a different working directory...
-	stored, err := session.New(session.RootWith(""), other, "older", "m")
+	stored, _, err := session.Open(session.RootWith(""), other, "older", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,9 +386,9 @@ api_key = "k"
 	defer os.Chdir(oldWd)
 
 	if _, err := captureStdout(t, func() error {
-		return runWithArgs([]string{"--continue-all", "-p", "carry on"})
+		return runWithArgs([]string{"--dir", other, "-p", "carry on"})
 	}); err != nil {
-		t.Fatalf("--continue-all failed: %v", err)
+		t.Fatalf("--dir failed: %v", err)
 	}
 
 	// The resumed run must have sent the stored history, not start from zero.
@@ -403,9 +396,6 @@ api_key = "k"
 		t.Fatal("no request reached the provider")
 	}
 	msgs, _ := mock.requests[0]["messages"].([]any)
-	if len(msgs) < 3 { // system + stored user + new user
-		t.Fatalf("the stored conversation was not resumed: %+v", msgs)
-	}
 	var carried bool
 	for _, raw := range msgs {
 		if m, ok := raw.(map[string]any); ok && m["content"] == "what did we decide?" {
@@ -414,6 +404,84 @@ api_key = "k"
 	}
 	if !carried {
 		t.Fatalf("the stored message is missing from the request: %+v", msgs)
+	}
+}
+
+// TestNewKeepsThePreviousConversation covers --new: the stored file is moved
+// aside and a fresh conversation begins.
+func TestNewKeepsThePreviousConversation(t *testing.T) {
+	_, cfgHome, _ := isolateXDG(t)
+	workdir := t.TempDir()
+	mock := newMockServer(t, [][]string{textChunks("fresh start")})
+
+	writeConfig(t, cfgHome, "config.toml", `
+model = "m"
+base_url = "`+mock.server.URL+`"
+api_key = "k"
+`)
+
+	stored, _, err := session.Open(session.RootWith(""), workdir, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = stored.AppendMessage(agent.NewUserMessage("old question"))
+	oldPath := stored.Path
+	if err := stored.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	if _, err := captureStdout(t, func() error {
+		return runWithArgs([]string{"--new", "-p", "a new question"})
+	}); err != nil {
+		t.Fatalf("--new failed: %v", err)
+	}
+
+	// The request must not carry the previous conversation.
+	if len(mock.requests) == 0 {
+		t.Fatal("no request reached the provider")
+	}
+	msgs, _ := mock.requests[0]["messages"].([]any)
+	for _, raw := range msgs {
+		if m, ok := raw.(map[string]any); ok && m["content"] == "old question" {
+			t.Fatalf("--new carried the previous conversation: %+v", msgs)
+		}
+	}
+	// The previous conversation is kept under an archive name, and the new file
+	// holds only the new turn.
+	entries, err := os.ReadDir(filepath.Dir(oldPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archived string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "session-") {
+			archived = filepath.Join(filepath.Dir(oldPath), e.Name())
+		}
+	}
+	if archived == "" {
+		t.Fatalf("the previous conversation was not kept: %v", entries)
+	}
+	kept, err := session.Load(archived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept.Messages) == 0 || kept.Messages[0].Content != "old question" {
+		t.Fatalf("the archived conversation lost its messages: %+v", kept.Messages)
+	}
+	fresh, err := session.Load(session.Path(session.RootWith(""), workdir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range fresh.Messages {
+		if m.Content == "old question" {
+			t.Fatalf("the new conversation carries the old one: %+v", fresh.Messages)
+		}
 	}
 }
 
@@ -495,62 +563,5 @@ func TestNegativeMaxRetriesFromConfig(t *testing.T) {
 	}
 	if !hasSetting(sources, "max_retries", "config") {
 		t.Fatalf("source not reported: %+v", sources)
-	}
-}
-
-// TestContinueAllIsOverriddenByExplicitSession pins the precedence between the
-// ways of choosing a session: an explicit --session wins over --continue-all,
-// and both are independent of -c.
-func TestContinueAllIsOverriddenByExplicitSession(t *testing.T) {
-	_, cfgHome, _ := isolateXDG(t)
-	workdir := t.TempDir()
-	mock := newMockServer(t, [][]string{textChunks("ok")})
-	writeConfig(t, cfgHome, "config.toml", `
-model = "m"
-base_url = "`+mock.server.URL+`"
-api_key = "k"
-`)
-
-	// Two sessions: the newest anywhere, and an older explicit one.
-	other := t.TempDir()
-	older, err := session.New(session.RootWith(""), other, "older", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = older.AppendMessage(agent.NewUserMessage("OLDER MARKER"))
-	_ = older.Close()
-	time.Sleep(10 * time.Millisecond)
-
-	newer, err := session.New(session.RootWith(""), other, "newer", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = newer.AppendMessage(agent.NewUserMessage("NEWER MARKER"))
-	_ = newer.Close()
-
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(workdir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(oldWd)
-
-	if _, err := captureStdout(t, func() error {
-		return runWithArgs([]string{"--continue-all", "--session", older.Path, "-p", "go on"})
-	}); err != nil {
-		t.Fatalf("run failed: %v", err)
-	}
-	msgs, _ := mock.requests[0]["messages"].([]any)
-	var carried []string
-	for _, raw := range msgs {
-		if m, ok := raw.(map[string]any); ok {
-			carried = append(carried, fmt.Sprint(m["content"]))
-		}
-	}
-	joined := strings.Join(carried, "\n")
-	if !strings.Contains(joined, "OLDER MARKER") {
-		t.Fatalf("--session should win over --continue-all: %v", carried)
-	}
-	if strings.Contains(joined, "NEWER MARKER") {
-		t.Fatalf("the newest session must not be used: %v", carried)
 	}
 }

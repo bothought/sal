@@ -194,7 +194,7 @@ It is available in the terminal UI and the web console. `/context summary` print
 the text of the active summary, if there is one, so the user can see exactly what
 the model was told about the compacted part of the conversation. `/context` and
 `/context summary` are commands of the two consoles, like `/session` and
-`/switch`; they have no equivalent in print or JSON mode, where the same figures
+`/new`; they have no equivalent in print or JSON mode, where the same figures
 reach the caller on the event stream instead.
 
 The breakdown's categories are the ones the context is assembled from, not a new
@@ -385,8 +385,8 @@ ability to compact.
   unchanged. The transcript block for that attempt says the compaction was
   cancelled, since the run's own failure notice is suppressed for an abort.
 - A compaction that is queued (a `/compact` submitted during a run) stays queued
-  with the conversation it was submitted in: switching sessions or starting a new
-  one drops it, exactly as it drops queued prompts.
+  with the conversation it was submitted in: opening another directory's
+  conversation, or `/new`, drops it, exactly as it drops queued prompts.
 - Compaction never runs while a tool call is outstanding, and never runs in the
   middle of a streamed answer; the cut is always between turns.
 
@@ -441,21 +441,19 @@ Consequences:
 - Resuming a compacted session does not restore the summarized messages into the
   model's context; it restores the summary. This is what makes resuming survivable
   for a long session.
-- The transcript rebuilt after a resume or a session switch shows the summary and
-  the messages after it, and says how many earlier messages are in the file but
-  not in the active context. It does not replay the summarized messages.
-- The session switcher marks a compacted session, so it is clear why it is
-  shorter than its file.
+- The transcript rebuilt after a resume shows the summary and the messages after
+  it, and says how many earlier messages are in the file but not in the active
+  context. It does not replay the summarized messages.
 
-### 6.2 `/clear`, `/new`, and session switching
+### 6.2 `/clear` and `/new`
 
-- `/clear` stays as it is: it empties the visible transcript and touches neither
-  the conversation nor the context indicator.
-- `/new` starts a fresh conversation and session; the indicator resets, and no
+- `/clear` empties the visible transcript and touches neither the conversation
+  nor the context indicator.
+- `/new` starts a fresh conversation and session; the indicator resets and no
   summary carries over.
-- Switching sessions aborts a run in flight, as it does today, and recomputes
-  both the limit (from the model in use) and the used figure (from the restored
-  context, marked `~` until the first response).
+- Opening another directory's conversation (`/new <path>`, `--dir`) aborts a run
+  in flight and recomputes both the limit (from the model in use) and the used
+  figure (from the restored context, marked `~` until the first response).
 
 ### 6.3 Model switching
 
@@ -537,7 +535,7 @@ this document is the reference for the new text:
 - §4.1 and §4.2 (the terminal and web footers) gain the context segment; the
   §4.1 footer description currently ends with the turn count.
 - §5 (sessions) notes that a compacted session keeps its full log and resumes
-  from the summary, and that the switcher marks it.
+  from the summary.
 - §6.1 (slash commands) gains `/context` and `/compact`.
 - §6.3 (config file) gains `context_window`, `auto_compact`, and `compact_at`;
   §6.4 (environment) is unchanged, as this feature adds no variables.

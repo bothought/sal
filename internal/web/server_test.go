@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/bothought/sal/internal/agent"
-	"github.com/bothought/sal/internal/session"
 )
 
 // fakeAgent is a scripted stand-in for *agent.Agent.
@@ -715,17 +714,16 @@ func TestStoredConversationIsRestoredIntoTheTranscript(t *testing.T) {
 	}
 }
 
-func TestOpenSessionCallbackRestoresTheNamedSession(t *testing.T) {
-	ag := &fakeAgent{}
-	id := "aaaa000011112222"
-	var opened string
+// TestPageURLDoesNotOpenAnotherConversation pins that a directory has one
+// conversation: the id in a URL cannot select a different one, so the console
+// serves what it started with.
+func TestPageURLDoesNotOpenAnotherConversation(t *testing.T) {
+	ag := &fakeAgent{history: []agent.Message{agent.NewUserMessage("the current work")}}
 	srv := newTestServer(t, ag, func(o *Options) {
-		o.SessionID = func() string { return id }
-		o.OpenSession = func(want string) (string, error) {
-			opened = want
-			ag.setHistory(agent.NewUserMessage("from " + want))
-			id = want
-			return want, nil
+		o.SessionID = func() string { return "aaaa000011112222" }
+		o.OpenSession = func(dir string) (string, error) {
+			t.Fatalf("a page URL must not open a conversation (dir %q)", dir)
+			return "", nil
 		}
 	})
 	ts := httptest.NewServer(srv.Handler())
@@ -736,32 +734,27 @@ func TestOpenSessionCallbackRestoresTheNamedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if opened != "cccc666677778888" {
-		t.Fatalf("opened = %q, want the session named in the URL", opened)
-	}
-	if id != "cccc666677778888" {
-		t.Fatalf("server session = %q", id)
+	if got := srv.SessionID(); got != "aaaa000011112222" {
+		t.Fatalf("server session = %q", got)
 	}
 
 	stream := connectSSE(t, ts.URL, srv.Token())
 	defer stream.close()
 	state := stream.waitFor(t, "state")
-	if state.SessionID != "cccc666677778888" {
+	if state.SessionID != "aaaa000011112222" {
 		t.Fatalf("state sessionId = %q", state.SessionID)
 	}
-	if len(state.Blocks) == 0 || state.Blocks[0].Body != "from cccc666677778888" {
-		t.Fatalf("transcript not restored from the opened session: %+v", state.Blocks)
+	if len(state.Blocks) == 0 || state.Blocks[0].Body != "the current work" {
+		t.Fatalf("the console should show its own conversation: %+v", state.Blocks)
 	}
 }
 
-func TestUnknownSessionInTheURLLeavesTheConsoleUsable(t *testing.T) {
-	var attempts int
+// TestStaleSessionInTheURLLeavesTheConsoleUsable covers a tab that outlived a
+// restart: the id in its URL no longer names the directory's conversation, and
+// the console keeps serving what it has.
+func TestStaleSessionInTheURLLeavesTheConsoleUsable(t *testing.T) {
 	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
 		o.SessionID = func() string { return "aaaa000011112222" }
-		o.OpenSession = func(string) (string, error) {
-			attempts++
-			return "", errors.New("no such session")
-		}
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -774,44 +767,8 @@ func TestUnknownSessionInTheURLLeavesTheConsoleUsable(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("index status = %d, want a served page", resp.StatusCode)
 	}
-	if attempts != 1 {
-		t.Fatalf("open attempts = %d", attempts)
-	}
 	if got := srv.SessionID(); got != "aaaa000011112222" {
-		t.Fatalf("session changed to %q after a failed open", got)
-	}
-}
-
-func TestSessionMenuIsSentWithTheSnapshot(t *testing.T) {
-	now := time.Now()
-	fake := &fakeAgent{}
-	srv := newTestServer(t, fake, func(o *Options) {
-		o.SessionID = func() string { return "aaaa000011112222" }
-		o.ListSessions = func() []session.Info {
-			return []session.Info{
-				{ID: "bbbb111122223333", Name: "older task", Model: "gpt-x", Messages: 4, UpdatedAt: now},
-				{ID: "aaaa000011112222", Name: "current", Model: "gpt-x", Messages: 2, UpdatedAt: now},
-			}
-		}
-	})
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	stream := connectSSE(t, ts.URL, srv.Token())
-	defer stream.close()
-	state := stream.waitFor(t, "state")
-	if len(state.Sessions) != 2 {
-		t.Fatalf("sessions in the snapshot = %+v, want 2", state.Sessions)
-	}
-	if state.Sessions[0].ID != "bbbb111122223333" || state.Sessions[0].Name != "older task" ||
-		state.Sessions[0].Messages != 4 || state.Sessions[0].UpdatedAt == "" {
-		t.Fatalf("first session entry = %+v", state.Sessions[0])
-	}
-	if !state.Sessions[1].Current {
-		t.Fatalf("the current session must be flagged: %+v", state.Sessions[1])
-	}
-	if state.Sessions[0].Current {
-		t.Fatalf("only the current session may be flagged: %+v", state.Sessions[0])
+		t.Fatalf("session changed to %q after a stale id", got)
 	}
 }
 
@@ -833,32 +790,23 @@ func TestOpenSessionEndpointSwitchesAndBroadcasts(t *testing.T) {
 	defer stream.close()
 	stream.waitFor(t, "state")
 
-	resp := post(t, ts.URL, srv.Token(), "/api/session/open", `{"id":"cccc666677778888"}`)
+	resp := post(t, ts.URL, srv.Token(), "/api/session/open", `{"dir":"/work/other"}`)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("open status = %d", resp.StatusCode)
 	}
-	if got := srv.SessionID(); got != "cccc666677778888" {
+	if got := srv.SessionID(); got != "/work/other" {
 		t.Fatalf("server session = %q", got)
 	}
 
 	// The pages see the switch as a new snapshot, already holding the
 	// conversation that was opened.
 	state := stream.waitFor(t, "state")
-	if state.SessionID != "cccc666677778888" {
+	if state.SessionID != "/work/other" {
 		t.Fatalf("broadcast sessionId = %q", state.SessionID)
 	}
-	if len(state.Blocks) == 0 || state.Blocks[0].Body != "from cccc666677778888" {
-		t.Fatalf("transcript not rebuilt for the opened session: %+v", state.Blocks)
-	}
-	var noted bool
-	for _, b := range state.Blocks {
-		if b.Body == "switched to session (cccc666677778888)" {
-			noted = true
-		}
-	}
-	if !noted {
-		t.Fatalf("the switch should be noted in the transcript: %+v", state.Blocks)
+	if len(state.Blocks) == 0 || state.Blocks[0].Body != "from /work/other" {
+		t.Fatalf("transcript not rebuilt for the opened directory: %+v", state.Blocks)
 	}
 }
 
@@ -871,7 +819,7 @@ func TestOpenSessionEndpointReportsFailure(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	resp := post(t, ts.URL, srv.Token(), "/api/session/open", `{"id":"missing"}`)
+	resp := post(t, ts.URL, srv.Token(), "/api/session/open", `{"dir":"/nope"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("open status = %d, want 409", resp.StatusCode)
@@ -885,12 +833,11 @@ func TestSessionEndpointsRequireToken(t *testing.T) {
 	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
 		o.SessionID = func() string { return "aaaa000011112222" }
 		o.OpenSession = func(string) (string, error) { return "", nil }
-		o.ListSessions = func() []session.Info { return nil }
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	for _, path := range []string{"/api/sessions", "/api/session/open"} {
+	for _, path := range []string{"/api/session/open"} {
 		req, err := http.NewRequest(http.MethodPost, ts.URL+path, strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
@@ -906,42 +853,12 @@ func TestSessionEndpointsRequireToken(t *testing.T) {
 	}
 }
 
-func TestSessionsEndpointListsWithoutTheCurrentOneFlagged(t *testing.T) {
+func TestOpenSessionWithNoOpenerIsRejected(t *testing.T) {
 	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
 		o.SessionID = func() string { return "aaaa000011112222" }
-		o.ListSessions = func() []session.Info {
-			return []session.Info{{ID: "aaaa000011112222", Messages: 1}}
-		}
 	})
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	resp := post(t, ts.URL, srv.Token(), "/api/sessions", `{}`)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("sessions status = %d", resp.StatusCode)
-	}
-	var body struct {
-		Sessions []sessionInfo `json:"sessions"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	if len(body.Sessions) != 1 || !body.Sessions[0].Current {
-		t.Fatalf("sessions = %+v", body.Sessions)
-	}
-}
-
-func TestOpenSessionWithNoOpenerIsRejected(t *testing.T) {
-	id := "aaaa000011112222"
-	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
-		o.SessionID = func() string { return id }
-	})
-	if err := srv.OpenSession("bbbb111122223333"); err == nil {
+	if err := srv.OpenSession("/work/other"); err == nil {
 		t.Fatal("expected an error when sessions are disabled")
-	}
-	if err := srv.OpenSession(id); err != nil {
-		t.Fatalf("opening the current session should be a no-op: %v", err)
 	}
 }
 
@@ -1057,7 +974,7 @@ func TestSwitchDuringARunDoesNotLeakTheOldTurn(t *testing.T) {
 	}
 
 	// Switch while it runs; the server must abort the turn and wait it out.
-	openResp := post(t, ts.URL, srv.Token(), "/api/session/open", `{"id":"bbbb111122223333"}`)
+	openResp := post(t, ts.URL, srv.Token(), "/api/session/open", `{"dir":"/work/other"}`)
 	openResp.Body.Close()
 	if openResp.StatusCode != http.StatusOK {
 		t.Fatalf("open status = %d", openResp.StatusCode)
@@ -1068,7 +985,7 @@ func TestSwitchDuringARunDoesNotLeakTheOldTurn(t *testing.T) {
 	if srv.isRunning() {
 		t.Fatal("the switch must wait for the aborted run to finish")
 	}
-	if got := srv.SessionID(); got != "bbbb111122223333" {
+	if got := srv.SessionID(); got != "/work/other" {
 		t.Fatalf("session = %q", got)
 	}
 
@@ -1079,8 +996,8 @@ func TestSwitchDuringARunDoesNotLeakTheOldTurn(t *testing.T) {
 			t.Fatalf("the abandoned turn leaked into the opened session: %+v", state.Blocks)
 		}
 	}
-	if len(state.Blocks) == 0 || state.Blocks[0].Body != "stored in bbbb111122223333" {
-		t.Fatalf("transcript not rebuilt for the opened session: %+v", state.Blocks)
+	if len(state.Blocks) == 0 || state.Blocks[0].Body != "stored in /work/other" {
+		t.Fatalf("transcript not rebuilt for the opened directory: %+v", state.Blocks)
 	}
 }
 
@@ -1112,7 +1029,7 @@ func TestSwitchDropsTheQueueOfTheAbandonedTurn(t *testing.T) {
 	resp.Body.Close()
 	stream.waitFor(t, "system") // the "queued" notice
 
-	openResp := post(t, ts.URL, srv.Token(), "/api/session/open", `{"id":"bbbb111122223333"}`)
+	openResp := post(t, ts.URL, srv.Token(), "/api/session/open", `{"dir":"/work/other"}`)
 	openResp.Body.Close()
 
 	// Give the (now empty) queue a moment; the abandoned prompt must not run.
@@ -1292,32 +1209,6 @@ func TestCompactingIsReportedToThePage(t *testing.T) {
 	defer stream.close()
 	if ev := stream.waitFor(t, "state"); !ev.CtxCompacting {
 		t.Fatalf("the page should be told compaction is running: %+v", ev)
-	}
-}
-
-func TestSessionMenuMarksACompactedSession(t *testing.T) {
-	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
-		o.SessionID = func() string { return "aaaa000011112222" }
-		o.ListSessions = func() []session.Info {
-			return []session.Info{
-				{ID: "aaaa000011112222", Messages: 9, Compacted: true},
-				{ID: "bbbb111122223333", Messages: 4},
-			}
-		}
-	})
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	resp := post(t, ts.URL, srv.Token(), "/api/sessions", `{}`)
-	defer resp.Body.Close()
-	var body struct {
-		Sessions []sessionInfo `json:"sessions"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	if len(body.Sessions) != 2 || !body.Sessions[0].Compacted || body.Sessions[1].Compacted {
-		t.Fatalf("compacted flags = %+v", body.Sessions)
 	}
 }
 

@@ -137,7 +137,6 @@
   <span class="name" id="title">sal</span>
   <span class="cwd" id="cwd"></span>
   <span class="spacer"></span>
-  <select id="sessionPicker" title="switch session" disabled></select>
 </header>
 
 <div id="transcript"><p class="empty">(empty conversation — type a task)</p></div>
@@ -176,14 +175,12 @@
   var cwdEl = document.getElementById("cwd");
   var sessionEl = document.getElementById("session");
   var usageEl = document.getElementById("usage");
-  var pickerEl = document.getElementById("sessionPicker");
 
   var state = { running: false, model: "", provider: "", status: "", usageIn: 0, usageOut: 0,
                 ctxUsed: 0, ctxLimit: 0, ctxExact: false, ctxCompactAt: 0,
                 ctxAutoCompact: false, ctxCompacting: false,
                 ctxSummary: "", ctxLastInput: 0, ctxLastOutput: 0,
-                turns: 0, session: "", sessionId: "", cwd: "", version: "", tools: [],
-                sessions: [], sessionsKnown: false };
+                turns: 0, session: "", sessionId: "", cwd: "", version: "", tools: [] };
   var blocks = [];
   var openAssistant = -1;
   var openTool = -1;
@@ -349,44 +346,6 @@
     return src || "resolved";
   }
 
-  // renderPicker fills the header menu with the switchable sessions, so a
-  // conversation can be reopened from any page without touching the URL.
-  function renderPicker() {
-    pickerEl.textContent = "";
-    if (!state.sessionsKnown) {
-      // Sessions are disabled (--no-session); the menu stays out of the way.
-      pickerEl.disabled = true;
-      pickerEl.style.display = "none";
-      return;
-    }
-    pickerEl.style.display = "";
-    var sessions = state.sessions || [];
-    if (sessions.length === 0) {
-      pickerEl.disabled = true;
-      var none = document.createElement("option");
-      none.value = "";
-      none.textContent = "no other sessions";
-      pickerEl.appendChild(none);
-      return;
-    }
-    pickerEl.disabled = false;
-    sessions.forEach(function (s) {
-      var opt = document.createElement("option");
-      opt.value = s.id;
-      opt.textContent = label(s);
-      if (s.current || s.id === state.sessionId) opt.selected = true;
-      pickerEl.appendChild(opt);
-    });
-  }
-
-  function label(s) {
-    var when = s.updatedAt ? new Date(s.updatedAt) : null;
-    var stamp = when && !isNaN(when) ? " · " + when.toLocaleString() : "";
-    var name = s.name ? " · " + s.name : "";
-    var compacted = s.compacted ? " · compacted" : "";
-    return short(s.id) + name + " · " + (s.messages || 0) + " msgs" + compacted + stamp;
-  }
-
   // human abbreviates a count: whole thousands and millions lose the decimal.
   function human(n) {
     if (n >= 1e6) return (n % 1e6 === 0 ? (n / 1e6) + "M" : (n / 1e6).toFixed(1) + "M");
@@ -407,7 +366,6 @@
         openTool = -1;
         render();
         syncSession(ev);
-        renderPicker();
         break;
       case "status":
         applyState(ev);
@@ -470,7 +428,7 @@
     if (urlSession && urlSession !== id) {
       appendBlock({ kind: "system", title: "session",
         body: "this console is now showing session " + short(id) +
-              " (was " + short(urlSession) + "); pick it again in the session menu to return", done: true });
+              " (was " + short(urlSession) + ")", done: true });
     }
     if (urlSession === id) return;
     urlSession = id;
@@ -513,7 +471,6 @@
     state.cwd = ev.cwd || "";
     state.version = ev.version || "";
     state.tools = ev.tools || [];
-    if (ev.sessions) { state.sessions = ev.sessions; state.sessionsKnown = true; }
     updateFooter();
   }
 
@@ -565,8 +522,8 @@
       case "?":
         appendBlock({ kind: "system", title: "help",
           body: "commands:\n  /help              show this help\n  /model [name]      show or switch the model\n" +
-                "  /new               start a new session\n  /session           show the current session\n" +
-                "  /switch [id]       switch to a stored session\n  /sessions          list the stored sessions\n" +
+                "  /new [dir]         start over, or continue another directory's conversation\n" +
+                "  /session           show the current session\n" +
                 "  /tools             list enabled tools\n" +
                 "  /context [summary] show the context window, or the active summary\n" +
                 "  /compact [notes]   summarize older messages to free context\n" +
@@ -581,6 +538,7 @@
         });
         break;
       case "new":
+        if (arg) { openSession(arg); break; }
         api("/api/new").catch(function (err) {
           appendBlock({ kind: "error", title: "new session", body: err.message, isError: true, done: true });
         });
@@ -588,18 +546,7 @@
       case "session":
         appendBlock({ kind: "system", title: "session", body: state.session || "no session (ephemeral mode)", done: true });
         break;
-      case "switch":
-        if (!arg) {
-          appendBlock({ kind: "system", title: "switch",
-            body: "pick a session in the menu at the top right, or use /switch <id>", done: true });
-          listSessions();
-          break;
-        }
-        openSession(arg);
-        break;
-      case "sessions":
-        listSessions();
-        break;
+
       case "tools":
         appendBlock({ kind: "system", title: "tools", body: (state.tools || []).join(", ") || "(none)", done: true });
         break;
@@ -634,29 +581,10 @@
 
   // openSession switches this console to a stored session; the server answers
   // with a fresh snapshot, which repaints the transcript and the menu.
-  function openSession(id) {
-    api("/api/session/open", { id: id }).catch(function (err) {
-      appendBlock({ kind: "error", title: "switch session", body: err.message, isError: true, done: true });
+  function openSession(dir) {
+    api("/api/session/open", { dir: dir }).catch(function (err) {
+      appendBlock({ kind: "error", title: "session", body: err.message, isError: true, done: true });
     });
-  }
-
-  // listSessions prints the stored sessions with the ids /switch accepts.
-  function listSessions() {
-    if (!state.sessionsKnown) {
-      appendBlock({ kind: "system", title: "sessions", body: "sessions are disabled (--no-session)", done: true });
-      return;
-    }
-    if ((state.sessions || []).length === 0) {
-      appendBlock({ kind: "system", title: "sessions", body: "no stored sessions", done: true });
-      return;
-    }
-    var lines = state.sessions.map(function (s) {
-      return "  " + short(s.id) + "  " + (s.messages || 0) + " msgs · " + (s.model || "no model") +
-             (s.name ? " · " + s.name : "") + (s.compacted ? " · compacted" : "") +
-             (s.current ? "  (current)" : "");
-    });
-    appendBlock({ kind: "system", title: "sessions",
-      body: lines.join("\n") + "\n\nswitch with /switch <id> or the menu at the top right", done: true });
   }
 
   input.addEventListener("keydown", function (e) {
@@ -670,14 +598,7 @@
   });
   sendBtn.addEventListener("click", submit);
   abortBtn.addEventListener("click", function () { api("/api/abort").catch(function () {}); });
-  pickerEl.addEventListener("change", function () {
-    var id = pickerEl.value;
-    if (!id || id === state.sessionId) return;
-    openSession(id);
-  });
-
   updateFooter();
-  renderPicker();
   input.focus();
   connect();
 })();

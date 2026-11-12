@@ -9,21 +9,13 @@ the release pipeline described in the same document.
 
 ## 1. Purpose
 
-sal is installed as one static binary, and today the only ways to get a newer
-version are `go install`, a rebuild from a checkout, or a manual download. Each
-of those requires knowing how sal was installed and having a toolchain or a
-browser at hand. A person who copied the binary somewhere on `PATH` has no
-in-place way to update it, and no way to even find out whether a newer release
-exists short of visiting the releases page.
+Release binaries are the normal way to run sal, and until now an installed copy
+had no way to find out whether a newer one exists, let alone replace itself
+without knowing how it was installed.
 
-The feature gives the user:
-
-- `sal upgrade --check`, which reports the installed version, the newest
-  published release, and whether an update is available — and changes nothing;
-- `sal upgrade`, which downloads the newest release for the machine it runs on,
-  verifies it, and replaces the running binary with it;
-- a clear, non-destructive failure in every case where the replacement cannot be
-  done safely, with the working binary left exactly as it was.
+The feature gives the user two commands: `sal upgrade --check`, which reports
+whether an update exists and writes nothing, and `sal upgrade`, which installs
+it. Every failure leaves the installed binary untouched.
 
 ## 2. Vocabulary
 
@@ -158,26 +150,13 @@ assets follow that naming is usable by any installed version that knows the
 platform rule. A machine whose platform has no asset in the release is told so
 by name (`no release asset for plan9/arm64`) and nothing is downloaded.
 
-### 3.7.1 Termux, and why the Linux archive still works there
+### 3.7.1 Android and Termux
 
-Android serves DNS through `netd` and does not write `/etc/resolv.conf`, so a
-binary that looks only at that file resolves nothing on a Termux device — and
-that includes the very request an upgrade needs. Termux keeps its resolver
-configuration at `$PREFIX/etc/resolv.conf` instead.
-
-Both ways of building sal for Termux therefore have the same problem: the
-standard Go resolver reads `/etc/resolv.conf` and nothing else, so neither the
-Linux nor the Android build of sal can look up a name there on its own. sal
-therefore finds its own name server when the system file is missing, before
-any request is made. An upgrade on Android is what that makes work: the
-downloaded archive is started by the version check and reaches the release
-once more on the next run.
-
-The same is true of certificates: Termux keeps its CA bundle under its own
-prefix, and the TLS stack looks only at the usual system locations. Where no
-system bundle exists, sal trusts the platform's own bundle. A machine with a
-system bundle, or one whose environment names a bundle explicitly, is
-unaffected: the fallback never runs there.
+Android serves DNS through a system daemon and does not write
+`/etc/resolv.conf`, the only path the Go resolver reads, and Termux keeps its CA
+bundle under its own prefix. Neither build target fixes that on its own, so sal
+reads the platform's resolver file and certificate bundle when the system ones
+are absent. A host that has them is unaffected.
 
 ### 3.8 What is checked before the binary is replaced
 
