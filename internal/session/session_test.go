@@ -4,8 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/bothought/sal/internal/agent"
 )
@@ -65,55 +65,9 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 }
 
-func TestLatestAndList(t *testing.T) {
-	root := t.TempDir()
-	cwd := t.TempDir()
-
-	if _, err := Latest(root, cwd); err == nil {
-		t.Fatal("expected ErrNoSessions for a fresh directory")
-	}
-
-	first, err := New(root, cwd, "first", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = first.AppendMessage(agent.NewUserMessage("one"))
-	_ = first.Close()
-
-	second, err := New(root, cwd, "second", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = second.AppendMessage(agent.NewUserMessage("two"))
-	_ = second.Close()
-
-	latest, err := Latest(root, cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if latest != second.Path {
-		t.Fatalf("Latest returned %s, want %s", latest, second.Path)
-	}
-
-	infos, err := List(root, cwd, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(infos) != 2 {
-		t.Fatalf("expected 2 sessions, got %d", len(infos))
-	}
-	if infos[0].Path != second.Path {
-		t.Fatalf("sessions not sorted newest first: %+v", infos)
-	}
-	if infos[0].Messages != 1 {
-		t.Fatalf("expected 1 message counted, got %d", infos[0].Messages)
-	}
-}
-
 func TestSessionsAreGroupedPerDirectory(t *testing.T) {
 	root := t.TempDir()
 	a := t.TempDir()
-	b := t.TempDir()
 
 	sess, err := New(root, a, "in-a", "m")
 	if err != nil {
@@ -124,13 +78,9 @@ func TestSessionsAreGroupedPerDirectory(t *testing.T) {
 	if err := sess.Close(); err != nil {
 		t.Fatal(err)
 	}
-	infosA, _ := List(root, a, false)
-	infosB, _ := List(root, b, false)
-	if len(infosA) != 1 {
-		t.Fatalf("expected 1 session for dir a, got %d", len(infosA))
-	}
-	if len(infosB) != 0 {
-		t.Fatalf("expected 0 sessions for dir b, got %d", len(infosB))
+	all, _ := List(root)
+	if len(all) != 1 || all[0].Cwd != canonicalDir(a) {
+		t.Fatalf("expected exactly one conversation, under dir a, got %+v", all)
 	}
 }
 
@@ -159,169 +109,6 @@ func TestRootWithDefaultsToXDGDataDirectory(t *testing.T) {
 	t.Setenv("SAL_SESSION_DIR", fromEnv)
 	if got := RootWith(""); got != fromEnv {
 		t.Fatalf("SAL_SESSION_DIR must win over XDG: %s", got)
-	}
-}
-
-func TestSearchRootsIsTheResolvedRoot(t *testing.T) {
-	home := isolate(t)
-	roots := SearchRoots("")
-	if len(roots) != 1 {
-		t.Fatalf("expected exactly one root, got %v", roots)
-	}
-	if want := filepath.Join(home, "data", "sal", "sessions"); roots[0] != want {
-		t.Fatalf("root = %s, want %s", roots[0], want)
-	}
-}
-
-func TestLatestInFindsNewestAcrossRoots(t *testing.T) {
-	home := isolate(t)
-	cwd := t.TempDir()
-	primary := filepath.Join(home, "data", "sal", "sessions")
-	secondary := filepath.Join(home, "other-root")
-
-	if _, err := LatestIn([]string{primary, secondary}, cwd, false); err == nil {
-		t.Fatal("expected ErrNoSessions when nothing is stored")
-	}
-
-	// an older session in the secondary root
-	old, err := New(secondary, cwd, "older", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = old.AppendMessage(agent.NewUserMessage("old"))
-	_ = old.Close()
-
-	oldPath := old.Path
-
-	found, err := LatestIn([]string{primary, secondary}, cwd, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if found != oldPath {
-		t.Fatalf("expected the session in the secondary root, got %s", found)
-	}
-
-	// a newer session in the primary root wins
-	time.Sleep(10 * time.Millisecond)
-	newer, err := New(primary, cwd, "newer", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = newer.AppendMessage(agent.NewUserMessage("new"))
-	_ = newer.Close()
-
-	found, err = LatestIn([]string{primary, secondary}, cwd, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if found != newer.Path {
-		t.Fatalf("expected the newer session %s, got %s", newer.Path, found)
-	}
-}
-
-func TestFindByIDAcceptsFullAndShortIDs(t *testing.T) {
-	isolate(t)
-	root := t.TempDir()
-	cwd := t.TempDir()
-
-	s, err := New(root, cwd, "named", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AppendMessage(agent.NewUserMessage("hello")); err != nil {
-		t.Fatal(err)
-	}
-	_ = s.Close()
-
-	for _, id := range []string{s.ID, s.ID[:8]} {
-		path, err := FindByID(root, id)
-		if err != nil {
-			t.Fatalf("FindByID(%q): %v", id, err)
-		}
-		if path != s.Path {
-			t.Fatalf("FindByID(%q) = %s, want %s", id, path, s.Path)
-		}
-	}
-
-	// a different project directory is searched too, not just the current cwd
-	other, err := New(root, t.TempDir(), "other", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = other.Close()
-	if path, err := FindByID(root, other.ID); err != nil || path != other.Path {
-		t.Fatalf("FindByID across project dirs = %q, %v", path, err)
-	}
-
-	if _, err := FindByID(root, "0123456789abcdef"); err == nil {
-		t.Fatal("expected an error for an unknown id")
-	}
-	if _, err := FindByID(root, ""); err == nil {
-		t.Fatal("expected an error for an empty id")
-	}
-	if _, err := FindByID(filepath.Join(root, "absent"), s.ID); err == nil {
-		t.Fatal("expected an error when the root does not exist")
-	}
-}
-
-func TestListAllFindsSessionsAcrossProjectBuckets(t *testing.T) {
-	root := t.TempDir()
-	a := t.TempDir()
-	b := t.TempDir()
-
-	inA, err := New(root, a, "in-a", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = inA.AppendMessage(agent.NewUserMessage("hello"))
-	_ = inA.Close()
-
-	inB, err := New(root, b, "in-b", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = inB.Close()
-
-	// The default listing is scoped to the working directory...
-	scoped, err := List(root, a, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(scoped) != 1 || scoped[0].Path != inA.Path {
-		t.Fatalf("scoped list = %+v, want only %s", scoped, inA.Path)
-	}
-
-	// ...while all lists every bucket, still filtered by the recorded cwd when
-	// one is given.
-	all, err := List(root, "", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 2 {
-		t.Fatalf("expected 2 sessions across buckets, got %+v", all)
-	}
-	for _, info := range all {
-		if info.ID == "" || info.Name == "" {
-			t.Fatalf("entries must be loaded, not just stat'ed: %+v", info)
-		}
-	}
-
-	onlyA, err := List(root, a, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(onlyA) != 1 || onlyA[0].ID != inA.ID {
-		t.Fatalf("filtered list = %+v, want only %s", onlyA, inA.ID)
-	}
-}
-
-func TestListAllOnAMissingRootIsEmpty(t *testing.T) {
-	infos, err := List(filepath.Join(t.TempDir(), "absent"), "", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(infos) != 0 {
-		t.Fatalf("expected no sessions, got %+v", infos)
 	}
 }
 
@@ -371,7 +158,7 @@ func TestCompactionRoundTripKeepsEveryMessage(t *testing.T) {
 		t.Fatal("message ids should survive a reload")
 	}
 
-	infos, err := List(root, cwd, false)
+	infos, err := List(root)
 	if err != nil || len(infos) != 1 {
 		t.Fatalf("list: %v %d", err, len(infos))
 	}
@@ -503,8 +290,8 @@ func TestOneDirectoryIsOneBucketThroughASymlink(t *testing.T) {
 	_ = sess.AppendMessage(agent.NewUserMessage("hi"))
 	_ = sess.Close()
 
-	// Listing the physical spelling finds what was written through the link.
-	infos, err := List(root, real, false)
+	// Listing finds what was written through the link.
+	infos, err := List(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,11 +303,282 @@ func TestOneDirectoryIsOneBucketThroughASymlink(t *testing.T) {
 	if infos[0].Cwd != ProjectDir("", real) && filepath.Base(infos[0].Cwd) == "" {
 		t.Fatalf("recorded cwd = %q", infos[0].Cwd)
 	}
-	all, err := List(root, real, true)
+	all, err := List(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(all) != 1 {
-		t.Fatalf("the machine-wide listing did not recognise the directory: %+v", all)
+		t.Fatalf("the listing did not recognise the directory: %+v", all)
+	}
+}
+
+// TestOneDirectoryOneFiles covers the model: a directory has one conversation at
+// a fixed path, reopened rather than duplicated.
+func TestOneDirectoryOneFile(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	first, resumed, err := Open(root, cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed {
+		t.Fatal("the first open must create")
+	}
+	_ = first.AppendMessage(agent.NewUserMessage("remember me"))
+	firstID := first.ID
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if want := Path(root, cwd); first.Path != want {
+		t.Fatalf("session path = %s, want %s", first.Path, want)
+	}
+
+	second, resumed, err := Open(root, cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed {
+		t.Fatal("a second open must resume")
+	}
+	if second.ID != firstID {
+		t.Fatalf("a second open created a new session (%s -> %s)", firstID, second.ID)
+	}
+	if len(second.Messages) != 1 || second.Messages[0].Content != "remember me" {
+		t.Fatalf("the conversation was not restored: %+v", second.Messages)
+	}
+	_ = second.Close()
+
+	// Reopening does not add a second file.
+	entries, err := os.ReadDir(filepath.Dir(second.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one file in the bucket, got %d: %v", len(entries), entries)
+	}
+}
+
+// TestArchiveKeepsThePreviousConversation covers --new: starting over moves the
+// file aside instead of deleting it.
+func TestArchiveKeepsThePreviousConversation(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	s, _, err := Open(root, cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.AppendMessage(agent.NewUserMessage("the old work"))
+	oldPath := s.Path
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	archived, err := Archive(root, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived == "" {
+		t.Fatal("Archive reported nothing to move")
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("the conversation is still at %s", oldPath)
+	}
+	kept, err := Load(archived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept.Messages) != 1 || kept.Messages[0].Content != "the old work" {
+		t.Fatalf("the archived conversation was not readable: %+v", kept.Messages)
+	}
+
+	// After archiving, opening starts fresh.
+	fresh, resumed, err := Open(root, cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	if resumed {
+		t.Fatal("opening after --new must start over")
+	}
+	if len(fresh.Messages) != 0 {
+		t.Fatalf("the new conversation carries messages: %+v", fresh.Messages)
+	}
+}
+
+// TestOpenAdoptsThePreviousLayout covers a directory written by an older
+// release: the newest timestamped file becomes the conversation, and the rest
+// are left alone.
+func TestOpenAdoptsThePreviousLayout(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+	dir := ProjectDir(root, cwd)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacy := func(name, content string) string {
+		t.Helper()
+		s := &Session{ID: "legacy-" + name, Cwd: canonicalDir(cwd), Path: filepath.Join(dir, name)}
+		if err := s.open(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.write(Entry{Type: "session", SessionID: s.ID, Cwd: s.Cwd}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.write(Entry{Type: "message", Message: &agent.Message{Role: agent.RoleUser, Content: content}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return s.Path
+	}
+	writeLegacy("20260101-000000-aaaaaaaa.jsonl", "older")
+	newest := writeLegacy("20260102-000000-bbbbbbbb.jsonl", "newest")
+
+	s, resumed, err := Open(root, cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if !resumed {
+		t.Fatal("an adopted conversation counts as resumed")
+	}
+	if len(s.Messages) != 1 || s.Messages[0].Content != "newest" {
+		t.Fatalf("did not adopt the newest file: %+v", s.Messages)
+	}
+	if _, err := os.Stat(newest); !os.IsNotExist(err) {
+		t.Fatalf("the adopted file should have moved to %s", Path(root, cwd))
+	}
+	// The older one is untouched.
+	if _, err := os.Stat(filepath.Join(dir, "20260101-000000-aaaaaaaa.jsonl")); err != nil {
+		t.Fatalf("the older conversation was disturbed: %v", err)
+	}
+}
+
+// TestEmptyFileIsNotAConversation covers a session file whose creation was
+// interrupted before the header was written: the leftover must not be resumed
+// as a conversation with no id and no directory.
+func TestEmptyFileIsNotAConversation(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+	path := Path(root, cwd)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, resumed, err := Open(root, cwd, "wanted", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if resumed {
+		t.Fatal("a file with no header is a leftover, not a conversation")
+	}
+	if s.ID == "" || s.ID == "session" {
+		t.Fatalf("the new conversation has no id of its own: %q", s.ID)
+	}
+	if s.Cwd == "" {
+		t.Fatal("the new conversation did not record its directory")
+	}
+	if s.Name != "wanted" {
+		t.Fatalf("the new conversation lost its name: %q", s.Name)
+	}
+}
+
+// TestConcurrentCreatesLeaveOneConversation covers two sal processes starting
+// in the same directory at once: one creates the conversation, the other opens
+// it, and the file holds a single header either way.
+func TestConcurrentCreatesLeaveOneConversation(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	const starters = 4
+	sessions := make([]*Session, starters)
+	errs := make([]error, starters)
+	var wg sync.WaitGroup
+	for i := 0; i < starters; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sessions[i], _, errs[i] = Open(root, cwd, "rival", "m")
+		}(i)
+	}
+	wg.Wait()
+
+	ids := map[string]bool{}
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("starter %d failed: %v", i, err)
+		}
+		ids[sessions[i].ID] = true
+	}
+	if len(ids) != 1 {
+		t.Fatalf("the starters disagree about the conversation: %v", ids)
+	}
+	for _, s := range sessions {
+		_ = s.Close()
+	}
+
+	data, err := os.ReadFile(Path(root, cwd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), `"type":"session"`); n != 1 {
+		t.Fatalf("the file holds %d session headers, want 1:\n%s", n, data)
+	}
+}
+
+// TestArchiveIsNotListed covers --new: the conversation moved aside stays on
+// disk but is no longer the directory's entry in the listing.
+func TestArchiveIsNotListed(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	old, _, err := Open(root, cwd, "the old one", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = old.AppendMessage(agent.NewUserMessage("old work"))
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := Archive(root, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a new conversation yet, the directory has none to show.
+	if infos, err := List(root); err != nil {
+		t.Fatal(err)
+	} else if len(infos) != 0 {
+		t.Fatalf("an archived conversation was listed: %+v", infos)
+	}
+
+	fresh, err := New(root, cwd, "the new one", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fresh.AppendMessage(agent.NewUserMessage("new work"))
+	if err := fresh.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	infos, err := List(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("expected one conversation per directory, got %+v", infos)
+	}
+	if infos[0].Path != Path(root, cwd) {
+		t.Fatalf("listed %s, want the current conversation %s (archived: %s)", infos[0].Path, Path(root, cwd), archived)
+	}
+	if infos[0].Name != "the new one" {
+		t.Fatalf("listed the wrong conversation: %+v", infos[0])
 	}
 }

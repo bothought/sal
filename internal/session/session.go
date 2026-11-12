@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -31,33 +32,6 @@ func RootWith(dir string) string {
 		return config.ExpandPath(v)
 	}
 	return config.Resolve().SessionDir
-}
-
-// SearchRoots returns the directories to search when resuming a session.
-func SearchRoots(explicit string) []string {
-	return []string{RootWith(explicit)}
-}
-
-// LatestIn returns the most recent session across the given roots.
-func LatestIn(roots []string, cwd string, all bool) (string, error) {
-	var newest string
-	var newestTime time.Time
-	for _, root := range roots {
-		infos, err := List(root, cwd, all)
-		if err != nil || len(infos) == 0 {
-			continue
-		}
-		// List is newest-first, but accumulate across roots to compare.
-		for _, info := range infos {
-			if newest == "" || info.UpdatedAt.After(newestTime) {
-				newest, newestTime = info.Path, info.UpdatedAt
-			}
-		}
-	}
-	if newest == "" {
-		return "", ErrNoSessions
-	}
-	return newest, nil
 }
 
 // canonicalDir resolves a working directory to the path that identifies it, so
@@ -171,17 +145,16 @@ type Session struct {
 	Compaction *Compaction
 	// UpdatedAt is the timestamp of the newest entry, used to order sessions.
 	UpdatedAt time.Time
+	// recorded reports that a session header was read from the file. A file
+	// without one is not a conversation, only a leftover from an interrupted
+	// creation.
+	recorded bool
 
 	mu         sync.Mutex
 	lastID     string
 	file       *os.File
 	messageIDs []string
 }
-
-var (
-	// ErrNoSessions is returned when a project has no stored sessions.
-	ErrNoSessions = fmt.Errorf("no saved sessions for this directory")
-)
 
 func newID() string {
 	b := make([]byte, 8)
@@ -193,7 +166,26 @@ func newID() string {
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-// New creates and persists a fresh session in the given root directory.
+// The names inside a project bucket. A directory's conversation always has the
+// fixed name; a conversation moved aside by --new keeps a stamp instead.
+const (
+	sessionName   = "session.jsonl"
+	archivedStart = "session-"
+)
+
+// Path is the file a directory's conversation lives in. A directory has
+// exactly one, so the name carries no timestamp or id.
+func Path(root, cwd string) string {
+	return filepath.Join(ProjectDir(root, cwd), sessionName)
+}
+
+// New creates and persists a fresh session in the given root directory. An
+// existing conversation there is not touched; callers that mean "start over"
+// move it aside first (see Archive).
+//
+// The file is created exclusively: two processes starting in the same
+// directory at the same moment cannot both become its conversation, the loser
+// is told the file exists and opens it instead (see Open).
 func New(root, cwd, name, model string) (*Session, error) {
 	dir := ProjectDir(root, cwd)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -201,18 +193,30 @@ func New(root, cwd, name, model string) (*Session, error) {
 	}
 	abs := canonicalDir(cwd)
 	id := newID()
-	stamp := time.Now().Format("20060102-150405")
-	path := filepath.Join(dir, fmt.Sprintf("%s-%s.jsonl", stamp, id[:8]))
+	path := Path(root, cwd)
 
 	s := &Session{ID: id, Name: name, Cwd: abs, Model: model, Path: path}
-	if err := s.open(); err != nil {
+	if err := s.create(); err != nil {
 		return nil, err
 	}
 	header := Entry{Type: "session", ID: newID(), Timestamp: now(), SessionID: id, Cwd: abs, Model: model, Name: name}
 	if _, err := s.write(header); err != nil {
+		_ = s.file.Close()
+		s.file = nil
 		return nil, err
 	}
+	s.recorded = true
 	return s, nil
+}
+
+// create makes the session file, refusing one that already exists.
+func (s *Session) create() error {
+	f, err := os.OpenFile(s.Path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	s.file = f
+	return nil
 }
 
 func (s *Session) open() error {
@@ -382,6 +386,124 @@ func (s *Session) Close() error {
 	return err
 }
 
+// Open returns the directory's conversation, creating it when there is none.
+//
+// A directory has one conversation, so this is the only way sal starts: there
+// is no list to choose from and no "continue" flag. A file written by an older
+// release — many timestamped files per directory — is adopted rather than
+// migrated: the newest becomes the conversation, and the rest stay on disk.
+func Open(root, cwd, name, model string) (*Session, bool, error) {
+	path := Path(root, cwd)
+	if _, err := os.Stat(path); err == nil {
+		s, err := Load(path)
+		if err != nil {
+			return nil, false, err
+		}
+		if !s.recorded {
+			// The file exists but holds no session header: its creation was
+			// interrupted before the header was written. It is a leftover, not
+			// a conversation, so drop it and create the conversation properly
+			// rather than resuming an id printed from a file name.
+			if err := os.Remove(path); err != nil {
+				return nil, false, err
+			}
+		} else {
+			if err := s.open(); err != nil {
+				return nil, false, err
+			}
+			return s, true, nil
+		}
+	}
+	// Adopt the newest file the old layout left in this directory's bucket. An
+	// archived conversation is excluded: starting over must not adopt what it
+	// just moved aside.
+	if legacy, err := newestLegacy(ProjectDir(root, cwd)); err == nil && legacy != "" {
+		if err := os.Rename(legacy, path); err == nil {
+			if s, lerr := Load(path); lerr == nil {
+				if oerr := s.open(); oerr == nil {
+					return s, true, nil
+				}
+			}
+		}
+	}
+	s, err := New(root, cwd, name, model)
+	if err != nil {
+		// A concurrent sal in the same directory won the creation. Its file is
+		// the directory's conversation now, so open that instead of failing.
+		if errors.Is(err, fs.ErrExist) {
+			s, lerr := Load(path)
+			if lerr != nil {
+				return nil, false, lerr
+			}
+			if oerr := s.open(); oerr != nil {
+				return nil, false, oerr
+			}
+			return s, true, nil
+		}
+		return nil, false, err
+	}
+	return s, false, nil
+}
+
+// newestLegacy returns the most recently written session file in dir that is not
+// the current layout's, or "".
+func newestLegacy(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var newest string
+	var newestAt time.Time
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") || e.Name() == sessionName {
+			continue
+		}
+		// Archived conversations are deliberately left out: --new must not be
+		// undone by the next open.
+		if strings.HasPrefix(e.Name(), archivedStart) {
+			continue
+		}
+		info, serr := stat(filepath.Join(dir, e.Name()))
+		if serr != nil || info.ID == "" {
+			// Unreadable, or a leftover with no session header in it.
+			continue
+		}
+		if newest == "" || info.UpdatedAt.After(newestAt) {
+			newest, newestAt = info.Path, info.UpdatedAt
+		}
+	}
+	return newest, nil
+}
+
+// Archive moves the directory's conversation out of the way and returns where it
+// went, so starting over is reversible. It reports "" when there was nothing to
+// move.
+func Archive(root, cwd string) (string, error) {
+	path := Path(root, cwd)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	dir := filepath.Dir(path)
+	stamp := time.Now().Format("20060102-150405")
+	dst := filepath.Join(dir, archivedStart+stamp+".jsonl")
+	for i := 1; ; i++ {
+		if _, err := os.Stat(dst); os.IsNotExist(err) {
+			break
+		}
+		dst = filepath.Join(dir, fmt.Sprintf("%s%s-%d.jsonl", archivedStart, stamp, i))
+	}
+	if err := os.Rename(path, dst); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
 // Load reads a session file and reconstructs its active (linear) branch.
 func Load(path string) (*Session, error) {
 	f, err := os.Open(path)
@@ -408,6 +530,7 @@ func Load(path string) (*Session, error) {
 			s.Cwd = e.Cwd
 			s.Model = e.Model
 			s.Name = e.Name
+			s.recorded = true
 		case "message":
 			if e.Message != nil {
 				s.Messages = append(s.Messages, *e.Message)
@@ -448,111 +571,64 @@ func min(a, b int) int {
 	return b
 }
 
-// FindByID locates the file of the session with the given id anywhere under
-// root. Both the full id and the 8-character prefix used in file names are
-// accepted, which is what lets the web console reopen the session named in a
-// page URL.
-func FindByID(root, id string) (string, error) {
-	root, id = strings.TrimSpace(root), strings.TrimSpace(id)
-	if root == "" || id == "" {
-		return "", ErrNoSessions
-	}
-	short := id
-	if len(short) > 8 {
-		short = short[:8]
-	}
-	suffix := "-" + short + ".jsonl"
-	var found string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), suffix) {
-			return nil
-		}
-		s, err := Load(path)
-		if err != nil {
-			return nil
-		}
-		if s.ID == id || strings.HasPrefix(s.ID, id) {
-			found = path
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if found == "" {
-		return "", ErrNoSessions
-	}
-	return found, nil
+// List returns the conversation of every directory under root, newest first.
+// One directory contributes one entry: its current session, or the newest file
+// the old layout left there when the current one does not exist yet.
+func List(root string) ([]Info, error) {
+	return listAll(root)
 }
 
-// Latest returns the most recently modified session for a working directory.
-func Latest(root, cwd string) (string, error) {
-	infos, err := List(root, cwd, false)
-	if err != nil {
-		return "", err
-	}
-	if len(infos) == 0 {
-		return "", ErrNoSessions
-	}
-	return infos[0].Path, nil
-}
-
-// List returns sessions, newest first. It covers the working directory's own
-// bucket, or every bucket under root when all is set, which is what the session
-// switchers use to show the conversations stored for this machine.
-func List(root, cwd string, all bool) ([]Info, error) {
-	if all {
-		return listAll(root, cwd)
-	}
-	return listDir(ProjectDir(root, cwd))
-}
-
-// listAll walks every project bucket under root and keeps the sessions whose
-// recorded cwd is wanted (when wanted is not empty).
-func listAll(root, wanted string) ([]Info, error) {
-	if strings.TrimSpace(wanted) != "" {
-		wanted = canonicalDir(wanted)
-	}
+// listAll walks every project bucket and keeps one entry per bucket: its
+// current session, or the newest file from the old layout when the bucket has
+// not been opened since.
+func listAll(root string) ([]Info, error) {
 	var infos []Info
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+		if !d.IsDir() {
 			return nil
 		}
-		info, serr := stat(path)
-		if serr != nil {
+		// Each bucket is one directory; the session files live inside it.
+		entries, rerr := os.ReadDir(path)
+		if rerr != nil || len(entries) == 0 {
 			return nil
 		}
-		if wanted != "" && info.Cwd != wanted {
+		// The fixed path is the directory's conversation whenever it exists;
+		// otherwise the newest file the old layout left stands in for it.
+		// Archived conversations are not listed: --new moved them aside.
+		chosen := ""
+		var chosenAt time.Time
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			p := filepath.Join(path, e.Name())
+			info, serr := stat(p)
+			if serr != nil || info.ID == "" {
+				// Unreadable, or a leftover with no session header in it.
+				continue
+			}
+			switch {
+			case e.Name() == sessionName:
+				chosen, chosenAt = p, info.UpdatedAt
+			case filepath.Base(chosen) == sessionName:
+				// Already holding the current conversation.
+			case strings.HasPrefix(e.Name(), archivedStart):
+				// Moved aside by --new; kept on disk, not listed.
+			case chosen == "" || info.UpdatedAt.After(chosenAt):
+				chosen, chosenAt = p, info.UpdatedAt
+			}
+		}
+		if chosen == "" {
 			return nil
 		}
-		infos = append(infos, info)
+		if info, serr := stat(chosen); serr == nil {
+			infos = append(infos, info)
+		}
 		return nil
 	})
-	sortInfos(infos)
-	return infos, nil
-}
-
-func listDir(dir string) ([]Info, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var infos []Info
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		info, err := stat(path)
-		if err != nil {
-			continue
-		}
-		infos = append(infos, info)
-	}
 	sortInfos(infos)
 	return infos, nil
 }
@@ -575,7 +651,7 @@ func stat(path string) (Info, error) {
 	}
 	info := Info{Path: path, UpdatedAt: fi.ModTime()}
 	s, err := Load(path)
-	if err != nil {
+	if err != nil || !s.recorded {
 		return info, nil
 	}
 	info.ID = s.ID
