@@ -2,6 +2,7 @@ package session
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,22 @@ func openStore(t *testing.T) (*Store, string) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st, root
+}
+
+// writeLegacyFile writes one JSONL file in the previous layout's format.
+func writeLegacyFile(t *testing.T, path string, entries ...legacyEntry) {
+	t.Helper()
+	var lines []string
+	for _, e := range entries {
+		data, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, string(data))
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSessionRoundTrip(t *testing.T) {
@@ -559,14 +576,17 @@ func TestLegacyJSONLIsImportedOnce(t *testing.T) {
 	}
 	writeLegacy := func(name, sessionID, content string, mod time.Time) string {
 		t.Helper()
-		lines := []string{
-			`{"type":"session","id":"h","timestamp":"2026-01-01T00:00:00Z","sessionId":"` + sessionID + `","cwd":"` + cwd + `","model":"m","name":"` + sessionID + `"}`,
-			`{"type":"message","id":"m1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"` + content + `"}}`,
-		}
 		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		// Marshalled rather than concatenated: a Windows path in a hand-built
+		// JSON string is an invalid escape, which would make the fixture (not
+		// the code) the thing under test.
+		writeLegacyFile(t, path, legacyEntry{
+			Type: "session", ID: "h", Timestamp: "2026-01-01T00:00:00Z",
+			SessionID: sessionID, Cwd: cwd, Model: "m", Name: sessionID,
+		}, legacyEntry{
+			Type: "message", ID: "m1", Timestamp: "2026-01-01T00:00:01Z",
+			Message: &agent.Message{Role: agent.RoleUser, Content: content},
+		})
 		if err := os.Chtimes(path, mod, mod); err != nil {
 			t.Fatal(err)
 		}
@@ -659,13 +679,12 @@ func TestLegacyFilesAppearingLaterAreStillImported(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	lines := []string{
-		`{"type":"session","id":"h","timestamp":"2026-01-01T00:00:00Z","sessionId":"cccccccc00000000","cwd":"` + cwd + `","model":"m"}`,
-		`{"type":"message","id":"m1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"late"}}`,
-	}
-	if err := os.WriteFile(filepath.Join(dir, "20260101-000000-cccccccc.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeLegacyFile(t, filepath.Join(dir, "20260101-000000-cccccccc.jsonl"),
+		legacyEntry{Type: "session", ID: "h", Timestamp: "2026-01-01T00:00:00Z", SessionID: "cccccccc00000000", Cwd: cwd, Model: "m"},
+		legacyEntry{
+			Type: "message", ID: "m1", Timestamp: "2026-01-01T00:00:01Z",
+			Message: &agent.Message{Role: agent.RoleUser, Content: "late"},
+		})
 
 	st, err = OpenStore(root)
 	if err != nil {
