@@ -275,17 +275,20 @@ api_key = "k"
 	}
 
 	root := filepath.Join(dataHome, "sal", "sessions")
-	if _, err := os.Stat(root); err != nil {
-		t.Fatalf("sessions should live under $XDG_DATA_HOME: %v", err)
+	if _, err := os.Stat(filepath.Join(root, "sal.db")); err != nil {
+		t.Fatalf("the store should live under $XDG_DATA_HOME: %v", err)
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("no session bucket created in %s: %v", root, err)
+	store, err := session.OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	bucket := filepath.Join(root, entries[0].Name())
-	files, _ := os.ReadDir(bucket)
-	if len(files) != 1 || !strings.HasSuffix(files[0].Name(), ".jsonl") {
-		t.Fatalf("expected one session file in %s, got %v", bucket, files)
+	defer store.Close()
+	infos, err := store.List()
+	if err != nil || len(infos) != 1 {
+		t.Fatalf("expected one stored conversation in %s, got %+v (%v)", root, infos, err)
+	}
+	if infos[0].Cwd != session.RootWith("") && infos[0].Cwd == "" {
+		t.Fatalf("the conversation has no directory: %+v", infos[0])
 	}
 	if _, err := os.Stat(filepath.Join(workdir, ".sal")); err == nil {
 		t.Fatal("nothing should be written outside the XDG directories")
@@ -314,7 +317,12 @@ func TestListSessionsShowsEveryDirectory(t *testing.T) {
 	workdir := t.TempDir()
 	other := t.TempDir()
 
-	current, resumed, err := session.Open(session.RootWith(""), workdir, "the first task", "m")
+	store, err := session.OpenStore(session.RootWith(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	current, resumed, err := store.Open(workdir, "the first task", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +334,7 @@ func TestListSessionsShowsEveryDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	elsewhere, err := session.New(session.RootWith(""), other, "another project", "m")
+	elsewhere, err := store.New(other, "another project", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +376,12 @@ api_key = "k"
 `)
 
 	// A conversation recorded under a different working directory...
-	stored, _, err := session.Open(session.RootWith(""), other, "older", "m")
+	store, err := session.OpenStore(session.RootWith(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stored, _, err := store.Open(other, "older", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,12 +433,17 @@ base_url = "`+mock.server.URL+`"
 api_key = "k"
 `)
 
-	stored, _, err := session.Open(session.RootWith(""), workdir, "", "m")
+	store, err := session.OpenStore(session.RootWith(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stored, _, err := store.Open(workdir, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = stored.AppendMessage(agent.NewUserMessage("old question"))
-	oldPath := stored.Path
+	oldID := stored.ID
 	if err := stored.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -452,31 +470,24 @@ api_key = "k"
 			t.Fatalf("--new carried the previous conversation: %+v", msgs)
 		}
 	}
-	// The previous conversation is kept under an archive name, and the new file
-	// holds only the new turn.
-	entries, err := os.ReadDir(filepath.Dir(oldPath))
+	// The previous conversation is kept, archived, and the current one holds
+	// only the new turn.
+	kept, err := store.Load(oldID)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("the previous conversation was not kept: %v", err)
 	}
-	var archived string
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "session-") {
-			archived = filepath.Join(filepath.Dir(oldPath), e.Name())
-		}
-	}
-	if archived == "" {
-		t.Fatalf("the previous conversation was not kept: %v", entries)
-	}
-	kept, err := session.Load(archived)
-	if err != nil {
-		t.Fatal(err)
+	if !kept.Archived {
+		t.Fatal("the previous conversation should be archived")
 	}
 	if len(kept.Messages) == 0 || kept.Messages[0].Content != "old question" {
 		t.Fatalf("the archived conversation lost its messages: %+v", kept.Messages)
 	}
-	fresh, err := session.Load(session.Path(session.RootWith(""), workdir))
+	fresh, _, err := store.Open(workdir, "", "m")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if fresh.ID == oldID {
+		t.Fatal("--new did not start a new conversation")
 	}
 	for _, m := range fresh.Messages {
 		if m.Content == "old question" {
