@@ -116,8 +116,11 @@ binary, so there is no build step or external asset. `--web-addr` defaults to
 - Every request needs the access token, which the startup URL carries and the
   page keeps; the token is persisted in `$XDG_STATE_HOME/sal/web-token` so an
   open tab survives a restart. `--web-token` / `$SAL_WEB_TOKEN` pin a value.
-- The session id rides in the URL: reloading reopens that conversation, and a
-  restarted server continues the directory's conversation.
+- The session id rides in the URL: reloading rebuilds the transcript from the
+  conversation the console is serving, and a restarted server continues the
+  directory's conversation. A directory has one conversation, so a URL cannot
+  select a different one: a stale id is noted on stderr and the page keeps
+  serving what the directory holds.
 - Every (re)connection starts from a full snapshot, so a dropped stream never
   duplicates or loses blocks.
 
@@ -184,6 +187,10 @@ that was in flight. Two consequences are visible and worth stating:
 - A finished turn is durable even though the process is still running, so a
   second terminal, or a restart, reads the same conversation.
 
+Starting sal where a conversation already exists says so on stderr, naming the
+conversation and its directory, in every mode; the prompt and the answer are
+unaffected.
+
 ### 5.3 Choosing the directory
 
 `sal` uses the working directory it was started in. Two flags name another one:
@@ -194,9 +201,11 @@ that was in flight. Two consequences are visible and worth stating:
 | `sal --new` | Start over in the current directory: the stored conversation is archived (never deleted) and a fresh one begins. |
 
 `/new` inside a console does the same, and needs the directory to be named when
-the console may be showing another one: `/new <path>` switches to the session
-stored for `<path>`, creating it when there is none. `/new` with no argument
-resets the current directory's conversation.
+the console may be showing another one: `/new <path>` switches to the
+conversation stored for `<path>`, creating it when there is none. `/new` with no
+argument resets the current directory's conversation, and is refused while a
+turn is in flight (in both consoles), because that turn's messages belong to the
+conversation being archived.
 
 ### 5.4 What a stored conversation carries
 

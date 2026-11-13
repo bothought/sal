@@ -129,6 +129,13 @@ func newTestModel(t *testing.T, a Agent) (*Model, chan agent.Event) {
 	return tm.(*Model), ch
 }
 
+// pumpAll drains a scripted run to completion, for tests that do not hold the
+// event channel themselves.
+func pumpAll(t *testing.T, m *Model) *Model {
+	t.Helper()
+	return pump(t, m, m.events)
+}
+
 // pump drains the agent's events into the model until the run finishes.
 func pump(t *testing.T, m *Model, ch chan agent.Event) *Model {
 	t.Helper()
@@ -350,6 +357,7 @@ func TestNewCommandResetsConversation(t *testing.T) {
 	m.opts.NewSession = func() (string, error) { newCalled = true; return "(session abc12345)", nil }
 
 	m, _ = typeAndEnter(t, m, "hello")
+	m = pumpAll(t, m)
 	m, _ = typeAndEnter(t, m, "/new")
 
 	if !newCalled {
@@ -415,9 +423,14 @@ func pressKey(t *testing.T, m *Model, k tea.KeyType) *Model {
 	return tm.(*Model)
 }
 
-func TestNewCommandDropsQueuedAndRepaintsTheEditor(t *testing.T) {
+// TestNewCommandIsRefusedWhileRunning pins the boundary the web console already
+// had: a turn's messages belong to the conversation being archived, so /new
+// waits for it instead of moving the conversation underneath it.
+func TestNewCommandIsRefusedWhileRunning(t *testing.T) {
 	fa := &fakeAgent{blocking: true}
 	m, ch := newTestModel(t, fa)
+	newCalled := false
+	m.opts.NewSession = func() (string, error) { newCalled = true; return "", nil }
 
 	m, _ = typeAndEnter(t, m, "first")
 	m, _ = typeAndEnter(t, m, "second")
@@ -426,20 +439,46 @@ func TestNewCommandDropsQueuedAndRepaintsTheEditor(t *testing.T) {
 	}
 
 	m, _ = typeAndEnter(t, m, "/new")
-	if len(m.queued) != 0 {
-		t.Fatalf("/new should drop the queue, got %v", m.queued)
+	if newCalled {
+		t.Fatal("/new must not start over while a turn is running")
 	}
-	if !strings.Contains(m.View(), "› ") {
-		t.Fatalf("the editor should come back after /new:\n%s", m.View())
+	if len(m.queued) != 1 {
+		t.Fatalf("/new must leave the queue alone while it is refused, got %v", m.queued)
+	}
+	if view := m.View(); !strings.Contains(view, "cannot start over while a turn is running") {
+		t.Fatalf("the refusal should say why:\n%s", view)
 	}
 	if fa.wasAborted() {
-		t.Fatal("starting a session must not abort the running turn")
+		t.Fatal("refusing /new must not abort the running turn")
 	}
 	// drain the run so the test does not leave a goroutine blocked
 	if m.cancel != nil {
 		m.cancel()
 	}
 	pump(t, m, ch)
+}
+
+// TestNewCommandAfterARunStartsOver pins that /new works again once the turn is
+// over, dropping the queue and repainting the editor.
+func TestNewCommandAfterARunStartsOver(t *testing.T) {
+	fa := &fakeAgent{}
+	m, _ := newTestModel(t, fa)
+	newCalled := false
+	m.opts.NewSession = func() (string, error) { newCalled = true; return "(started over)", nil }
+
+	m, _ = typeAndEnter(t, m, "hello")
+	m = pumpAll(t, m)
+	m, _ = typeAndEnter(t, m, "/new")
+
+	if !newCalled {
+		t.Fatal("/new should start over once no turn is running")
+	}
+	if len(m.queued) != 0 {
+		t.Fatalf("/new should drop the queue, got %v", m.queued)
+	}
+	if !strings.Contains(m.View(), "› ") {
+		t.Fatalf("the editor should come back after /new:\n%s", m.View())
+	}
 }
 
 func TestRetryIsShownInTheTranscript(t *testing.T) {

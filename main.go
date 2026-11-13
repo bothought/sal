@@ -1,7 +1,7 @@
 // Command sal is a minimal coding agent written in Go with bubbletea. It runs
 // an agent loop over an OpenAI-compatible provider with the
-// read/bash/edit/write/grep/find/ls tools, a terminal UI, JSONL sessions, and
-// print/JSON modes.
+// read/bash/edit/write/grep/find/ls tools, a terminal UI, a SQLite session
+// store, and print/JSON modes.
 package main
 
 import (
@@ -284,35 +284,43 @@ func runWithArgs(args []string) error {
 	ag.AutoCompact = opts.autoCompact
 	ag.CompactAt = opts.compactAt
 
-	// Sessions: a directory has one conversation, stored under the XDG data
-	// directory, unless --no-session.
+	// Sessions: a directory has one conversation, stored in the database under
+	// the XDG data directory, unless --no-session.
 	var sess *session.Session
+	var store *session.Store
 	if !opts.noSession {
 		root := session.RootWith(opts.sessionDir)
+		store, err = session.OpenStore(root)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
 		switch {
 		case opts.sessionPath != "":
-			sess, err = session.Load(opts.sessionPath)
+			// The flag names a conversation id; the file it used to name is
+			// imported on the first start with the database.
+			if looksLikePath(opts.sessionPath) {
+				return fmt.Errorf("--session now takes a conversation id, not a file (see --list-sessions)")
+			}
+			sess, err = store.Load(opts.sessionPath)
 			if err != nil {
-				return fmt.Errorf("cannot load session %s: %w", opts.sessionPath, err)
+				return fmt.Errorf("cannot load conversation %s: %w", opts.sessionPath, err)
 			}
 		case opts.newSession:
-			// Move the stored conversation aside and start over; nothing is
+			// Archive the stored conversation and start over; nothing is
 			// deleted, so this is reversible.
-			if _, err := session.Archive(root, cwd); err != nil {
-				return fmt.Errorf("cannot start a new session: %w", err)
-			}
-			sess, err = session.New(root, cwd, opts.name, prov.ModelName())
+			sess, err = store.New(cwd, opts.name, prov.ModelName())
 			if err != nil {
-				return fmt.Errorf("cannot create session: %w", err)
+				return fmt.Errorf("cannot start a new session: %w", err)
 			}
 		default:
 			var resumed bool
-			sess, resumed, err = session.Open(root, cwd, opts.name, prov.ModelName())
+			sess, resumed, err = store.Open(cwd, opts.name, prov.ModelName())
 			if err != nil {
 				return fmt.Errorf("cannot open session: %w", err)
 			}
 			if resumed {
-				fmt.Fprintln(os.Stderr, "sal: continuing "+sess.Path)
+				fmt.Fprintln(os.Stderr, "sal: continuing conversation "+shortSessionID(sess.ID)+" ("+displayDir(sess.Cwd)+")")
 			}
 		}
 		ag.SetHistory(sess.Messages)
@@ -352,11 +360,11 @@ func runWithArgs(args []string) error {
 
 	switch {
 	case opts.web:
-		return runWeb(ctx, ag, cwd, prompt, opts.sessionDir, sess, opts.webAddr, opts.webToken)
+		return runWeb(ctx, ag, store, cwd, prompt, sess, opts.webAddr, opts.webToken)
 	case jsonMode:
 		return runJSON(ctx, ag, prompt)
 	case interactive:
-		return runInteractive(ag, cwd, prompt, opts.sessionDir, sess)
+		return runInteractive(ag, store, cwd, prompt, sess)
 	default:
 		return runPrint(ctx, ag, prompt, os.Stdout, os.Stderr)
 	}
@@ -404,7 +412,7 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 	fs.BoolVar(&o.newSession, "new", false, "move this directory's stored conversation aside and start fresh")
 	fs.StringVar(&o.dir, "dir", "", "work on this directory's conversation instead of the current one")
 	fs.BoolVar(&o.listSessions, "list-sessions", false, "list the conversations stored on this machine and exit")
-	fs.StringVar(&o.sessionPath, "session", "", "session file to open")
+	fs.StringVar(&o.sessionPath, "session", "", "conversation id to open (see --list-sessions)")
 	fs.StringVar(&o.sessionDir, "session-dir", "", "session storage directory (default $XDG_DATA_HOME/sal/sessions)")
 	fs.BoolVar(&o.noSession, "no-session", false, "do not save the session")
 	fs.StringVar(&o.name, "n", "", "session display name")
@@ -631,21 +639,34 @@ func boolText(v bool) string {
 // directory. A directory has one conversation, so there is no id to choose and
 // no resume flag: the directory is the identity.
 func printSessions(root string) {
-	infos, err := session.List(root)
+	if !session.Exists(root) {
+		// Listing must not create a store: a machine with nothing stored says
+		// so and is left untouched.
+		fmt.Printf("no stored conversations\n")
+		fmt.Printf("  (store: %s)\n", session.DBPath(root))
+		return
+	}
+	store, err := session.OpenStore(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sal: cannot list sessions: %v\n", err)
+		return
+	}
+	defer store.Close()
+	infos, err := store.List()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sal: cannot list sessions: %v\n", err)
 		return
 	}
 	if len(infos) == 0 {
 		fmt.Printf("no stored conversations\n")
-		fmt.Printf("  (session dir: %s)\n", root)
+		fmt.Printf("  (store: %s)\n", store.Path())
 		return
 	}
 	fmt.Printf("%d conversation(s) on this machine:\n\n", len(infos))
 	for _, info := range infos {
 		fmt.Printf("  %-40s %s\n", displayDir(info.Cwd), sessionLabel(info))
 	}
-	fmt.Printf("\nuse --dir <path> to work on one of them\n")
+	fmt.Printf("\nuse --dir <path> to continue a directory's conversation\n")
 }
 
 // displayDir shortens a directory for the listing.
@@ -881,16 +902,23 @@ func runJSON(ctx context.Context, ag *agent.Agent, prompt string) error {
 
 // sessionSummary describes an active session for the TUI/web footers.
 func sessionSummary(sess *session.Session) string {
-	return fmt.Sprintf("id %s · %s · %d messages", shortSessionID(sess.ID), sess.Path, len(sess.Messages))
+	body := fmt.Sprintf("id %s · %s · %d messages", shortSessionID(sess.ID), displayDir(sess.Cwd), len(sess.Messages))
+	if sess.Archived {
+		body += " · archived"
+	}
+	return body
 }
 
 // sessionLabel is the one-line description of a stored conversation in
 // --list-sessions: how much is in it, when it was last used, and its name.
 func sessionLabel(info session.Info) string {
 	name := strings.TrimSpace(info.Name)
-	body := fmt.Sprintf("%d msgs · %s", info.Messages, info.UpdatedAt.Format("2006-01-02 15:04"))
+	body := fmt.Sprintf("%s  %d msgs · %s", shortSessionID(info.ID), info.Messages, info.UpdatedAt.Format("2006-01-02 15:04"))
 	if info.Compacted {
 		body += " · compacted"
+	}
+	if info.Archived {
+		body += " · archived"
 	}
 	if name != "" {
 		return fmt.Sprintf("%s — %s", body, name)
@@ -925,11 +953,10 @@ type sessionCallbacks struct {
 // the web console. When either starts over or opens another directory's
 // conversation, the agent and the (possibly replaced) session are rewired so
 // persistence keeps working.
-func sessionHooks(ag *agent.Agent, cwd, sessionDir string, sess *session.Session) sessionCallbacks {
-	if sess == nil {
+func sessionHooks(ag *agent.Agent, st *session.Store, cwd string, sess *session.Session) sessionCallbacks {
+	if sess == nil || st == nil {
 		return sessionCallbacks{Info: func() string { return "" }, ID: func() string { return "" }}
 	}
-	root := session.RootWith(sessionDir)
 	info := func() string {
 		if sess == nil {
 			return ""
@@ -960,10 +987,7 @@ func sessionHooks(ag *agent.Agent, cwd, sessionDir string, sess *session.Session
 		}
 	}
 	newSession := func() (string, error) {
-		if _, err := session.Archive(root, cwd); err != nil {
-			return "", err
-		}
-		ns, err := session.New(root, cwd, "", ag.ModelName())
+		ns, err := st.New(cwd, "", ag.ModelName())
 		if err != nil {
 			return "", err
 		}
@@ -979,7 +1003,7 @@ func sessionHooks(ag *agent.Agent, cwd, sessionDir string, sess *session.Session
 			}
 			target = resolved
 		}
-		ns, resumed, err := session.Open(root, target, "", ag.ModelName())
+		ns, resumed, err := st.Open(target, "", ag.ModelName())
 		if err != nil {
 			return "", err
 		}
@@ -993,6 +1017,14 @@ func sessionHooks(ag *agent.Agent, cwd, sessionDir string, sess *session.Session
 		return fmt.Sprintf("(%d messages in %s)", len(ns.Messages), displayDir(target)), nil
 	}
 	return sessionCallbacks{Info: info, ID: id, New: newSession, Open: openSession}
+}
+
+// looksLikePath reports whether a value names a file rather than a conversation
+// id the current storage would accept, so --session can point an older habit at
+// --list-sessions instead of failing obscurely.
+func looksLikePath(v string) bool {
+	v = strings.TrimSpace(v)
+	return strings.ContainsAny(v, `/\`) || strings.HasSuffix(v, ".jsonl")
 }
 
 // dirPath resolves a directory argument against the working directory and
@@ -1036,8 +1068,8 @@ func restoreCompaction(ag *agent.Agent, sess *session.Session) {
 	})
 }
 
-func runInteractive(ag *agent.Agent, cwd, prompt, sessionDir string, sess *session.Session) error {
-	cbs := sessionHooks(ag, cwd, sessionDir, sess)
+func runInteractive(ag *agent.Agent, store *session.Store, cwd, prompt string, sess *session.Session) error {
+	cbs := sessionHooks(ag, store, cwd, sess)
 	opts := tui.Options{
 		Agent:         ag,
 		Cwd:           cwd,
@@ -1055,8 +1087,8 @@ func runInteractive(ag *agent.Agent, cwd, prompt, sessionDir string, sess *sessi
 
 // runWeb serves the same console in a browser. The agent, tools, session and
 // event stream are shared with the terminal UI; only the rendering differs.
-func runWeb(ctx context.Context, ag *agent.Agent, cwd, prompt, sessionDir string, sess *session.Session, addr, token string) error {
-	cbs := sessionHooks(ag, cwd, sessionDir, sess)
+func runWeb(ctx context.Context, ag *agent.Agent, store *session.Store, cwd, prompt string, sess *session.Session, addr, token string) error {
+	cbs := sessionHooks(ag, store, cwd, sess)
 	srv := web.New(web.Options{
 		Agent:         ag,
 		Cwd:           cwd,
@@ -1117,7 +1149,7 @@ modes:
 options:
   --new                move this directory's conversation aside and start fresh
   --dir <path>         work on that directory's conversation instead
-  --session <path>     open a specific session file
+  --session <id>       open a specific stored conversation
   --no-session         do not persist the session
   --list-sessions      list the conversations stored on this machine
   -n, --name <name>    session display name

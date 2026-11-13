@@ -521,6 +521,13 @@ func (m *Model) handleCommand(text string) {
 			m.openDirectory(strings.Join(args, " "))
 			return
 		}
+		if m.running {
+			// The web console refuses this too. The turn's messages belong to
+			// the conversation being archived, and its result would be written
+			// into the one replacing it.
+			m.addBlock(kindError, "new session", "cannot start over while a turn is running (esc aborts it)")
+			return
+		}
 		m.resetConversation()
 		desc := ""
 		if m.opts.NewSession != nil {

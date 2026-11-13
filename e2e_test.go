@@ -22,10 +22,30 @@ import (
 	"github.com/bothought/sal/internal/tools"
 )
 
-// newSessionFor creates a session in the configured store for the given cwd.
+// newSessionFor creates a conversation in the configured store for the given
+// cwd. The store is closed with the test, as another process closing its own
+// connection would be.
 func newSessionFor(t *testing.T, cwd, name string) (*session.Session, error) {
 	t.Helper()
-	return session.New(session.RootWith(""), cwd, name, "mock")
+	store, err := session.OpenStore(session.RootWith(""))
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sess, _, err := store.Open(cwd, name, "mock")
+	return sess, err
+}
+
+// reloadSession reads a stored conversation back from the configured store,
+// which is what a restart does.
+func reloadSession(t *testing.T, id string) (*session.Session, error) {
+	t.Helper()
+	store, err := session.OpenStore(session.RootWith(""))
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store.Load(id)
 }
 
 // mockServer scripted like a provider: every response is a list of SSE chunks.
@@ -582,16 +602,18 @@ func TestSessionPersistenceThroughAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data, err := os.ReadFile(sess.Path)
+	stored, err := reloadSession(t, sess.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 3 { // session header, user, assistant
-		t.Fatalf("expected 3 session lines, got %d:\n%s", len(lines), data)
+	if len(stored.Messages) != 2 { // the user turn and the answer
+		t.Fatalf("expected 2 stored messages, got %d: %+v", len(stored.Messages), stored.Messages)
 	}
-	if !strings.Contains(lines[0], `"type":"session"`) || !strings.Contains(lines[1], `"role":"user"`) {
-		t.Fatalf("unexpected session file:\n%s", data)
+	if stored.Messages[0].Role != agent.RoleUser || stored.Messages[0].Content != "remember this" {
+		t.Fatalf("the user turn was not stored: %+v", stored.Messages[0])
+	}
+	if stored.Messages[1].Role != agent.RoleAssistant || stored.Messages[1].Content != "noted" {
+		t.Fatalf("the answer was not stored: %+v", stored.Messages[1])
 	}
 }
 
@@ -1043,12 +1065,12 @@ func TestCompactionSurvivesAResume(t *testing.T) {
 	if _, err := ag.Compact(context.Background(), "", false); err != nil {
 		t.Fatal(err)
 	}
-	path := sess.Path
+	id := sess.ID
 	if err := sess.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	loaded, err := session.Load(path)
+	loaded, err := reloadSession(t, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1127,12 +1149,12 @@ func TestResumeKeepsShortenedToolResults(t *testing.T) {
 	if info.Shortened == 0 {
 		t.Fatal("the tail is larger than the target, so a tool result should have been shortened")
 	}
-	path := sess.Path
+	id := sess.ID
 	if err := sess.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	loaded, err := session.Load(path)
+	loaded, err := reloadSession(t, id)
 	if err != nil {
 		t.Fatal(err)
 	}

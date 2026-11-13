@@ -1,6 +1,7 @@
 package session
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,13 +12,28 @@ import (
 	"github.com/bothought/sal/internal/agent"
 )
 
-func TestSessionRoundTrip(t *testing.T) {
+// openStore opens a store in a fresh root, closing it with the test.
+func openStore(t *testing.T) (*Store, string) {
+	t.Helper()
 	root := t.TempDir()
-	cwd := t.TempDir()
-
-	s, err := New(root, cwd, "my task", "test-model")
+	st, err := OpenStore(root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st, root
+}
+
+func TestSessionRoundTrip(t *testing.T) {
+	st, _ := openStore(t)
+	cwd := t.TempDir()
+
+	s, resumed, err := st.Open(cwd, "my task", "test-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed {
+		t.Fatal("a fresh directory must not resume")
 	}
 	if err := s.AppendMessage(agent.NewUserMessage("hello")); err != nil {
 		t.Fatal(err)
@@ -31,57 +47,81 @@ func TestSessionRoundTrip(t *testing.T) {
 	if err := s.SetName("renamed"); err != nil {
 		t.Fatal(err)
 	}
-	path := s.Path
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
 
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("session file not written: %v", err)
-	}
-
-	loaded, err := Load(path)
+	again, resumed, err := st.Open(cwd, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.ID != s.ID {
-		t.Fatalf("id mismatch: %s vs %s", loaded.ID, s.ID)
+	if !resumed {
+		t.Fatal("a second open must resume")
 	}
-	if loaded.Name != "renamed" {
-		t.Fatalf("name not persisted: %q", loaded.Name)
+	if again.ID != s.ID {
+		t.Fatalf("id mismatch: %s vs %s", again.ID, s.ID)
 	}
-	if loaded.Model != "other-model" {
-		t.Fatalf("model not persisted: %q", loaded.Model)
+	if again.Name != "renamed" {
+		t.Fatalf("name not persisted: %q", again.Name)
 	}
-	if len(loaded.Messages) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(loaded.Messages))
+	if again.Model != "other-model" {
+		t.Fatalf("model not persisted: %q", again.Model)
 	}
-	if loaded.Messages[0].Content != "hello" || loaded.Messages[1].Content != "hi there" {
-		t.Fatalf("messages not reconstructed: %+v", loaded.Messages)
+	if len(again.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(again.Messages))
 	}
+	if again.Messages[0].Content != "hello" || again.Messages[1].Content != "hi there" {
+		t.Fatalf("messages not reconstructed: %+v", again.Messages)
+	}
+	if again.Cwd != canonicalDir(cwd) {
+		t.Fatalf("directory not recorded: %q", again.Cwd)
+	}
+}
 
-	// The bucket name, wherever the root put it.
-	if slug := filepath.Base(ProjectDir("", cwd)); path != "" && !strings.Contains(path, slug) {
-		t.Fatalf("session not stored in the project bucket %q: %s", slug, path)
+// TestMessagesKeepTheirOrder pins that the order is stored, not re-derived from
+// the clock: a conversation comes back the way it was appended.
+func TestMessagesKeepTheirOrder(t *testing.T) {
+	st, _ := openStore(t)
+	cwd := t.TempDir()
+	s, _, err := st.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, text := range []string{"a", "b", "c", "d"} {
+		m := agent.NewUserMessage(text)
+		// A clock that does not move is the hostile case for ordering by time.
+		m.Timestamp = "2026-01-01T00:00:00Z"
+		if err := s.AppendMessage(m); err != nil {
+			t.Fatal(err)
+		}
+		_ = i
+	}
+	again, _, err := st.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range again.Messages {
+		got = append(got, m.Content)
+	}
+	if strings.Join(got, "") != "abcd" {
+		t.Fatalf("messages came back out of order: %v", got)
 	}
 }
 
 func TestSessionsAreGroupedPerDirectory(t *testing.T) {
-	root := t.TempDir()
+	st, _ := openStore(t)
 	a := t.TempDir()
 
-	sess, err := New(root, a, "in-a", "m")
+	if _, _, err := st.Open(a, "in-a", "m"); err != nil {
+		t.Fatal(err)
+	}
+	all, err := st.List()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Close the file: Windows refuses to remove a directory whose file is still
-	// open, so an unclosed handle fails the test's own cleanup.
-	if err := sess.Close(); err != nil {
-		t.Fatal(err)
-	}
-	all, _ := List(root)
 	if len(all) != 1 || all[0].Cwd != canonicalDir(a) {
 		t.Fatalf("expected exactly one conversation, under dir a, got %+v", all)
+	}
+	if !all[0].Current {
+		t.Fatalf("a directory's conversation should be current: %+v", all[0])
 	}
 }
 
@@ -114,10 +154,10 @@ func TestRootWithDefaultsToXDGDataDirectory(t *testing.T) {
 }
 
 func TestCompactionRoundTripKeepsEveryMessage(t *testing.T) {
-	root := t.TempDir()
+	st, _ := openStore(t)
 	cwd := t.TempDir()
 
-	s, err := New(root, cwd, "", "m")
+	s, _, err := st.Open(cwd, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,18 +173,14 @@ func TestCompactionRoundTripKeepsEveryMessage(t *testing.T) {
 	if err := s.AppendCompaction(Compaction{Summary: "the summary", Messages: 2, Shortened: 1}, through); err != nil {
 		t.Fatal(err)
 	}
-	path := s.Path
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
 
-	loaded, err := Load(path)
+	loaded, _, err := st.Open(cwd, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The log stays complete: compaction does not delete what it summarized.
+	// The history stays complete: compaction does not delete what it summarized.
 	if len(loaded.Messages) != 4 {
-		t.Fatalf("the file should keep every message, got %d", len(loaded.Messages))
+		t.Fatalf("the store should keep every message, got %d", len(loaded.Messages))
 	}
 	if loaded.Compaction == nil {
 		t.Fatal("the compaction was not restored")
@@ -159,12 +195,44 @@ func TestCompactionRoundTripKeepsEveryMessage(t *testing.T) {
 		t.Fatal("message ids should survive a reload")
 	}
 
-	infos, err := List(root)
+	infos, err := st.List()
 	if err != nil || len(infos) != 1 {
 		t.Fatalf("list: %v %d", err, len(infos))
 	}
 	if !infos[0].Compacted {
-		t.Fatal("a compacted session should be marked in listings")
+		t.Fatal("a compacted conversation should be marked in listings")
+	}
+}
+
+// TestCompactionReplacesThePreviousOne pins that a second compaction updates the
+// single row rather than stacking summaries.
+func TestCompactionReplacesThePreviousOne(t *testing.T) {
+	st, _ := openStore(t)
+	cwd := t.TempDir()
+	s, _, err := st.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"one", "two", "three", "four"} {
+		if err := s.AppendMessage(agent.NewUserMessage(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.AppendCompaction(Compaction{Summary: "first", Messages: 1}, s.MessageID(0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCompaction(Compaction{Summary: "second", Messages: 3}, s.MessageID(2)); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := st.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Compaction == nil || loaded.Compaction.Summary != "second" {
+		t.Fatalf("the latest compaction should win: %+v", loaded.Compaction)
+	}
+	if got := loaded.CompactionIndex(); got != 2 {
+		t.Fatalf("the compaction should cover messages 0..2, got %d", got)
 	}
 }
 
@@ -176,12 +244,12 @@ func TestCompactionIndexIsUnknownForAMissingMessage(t *testing.T) {
 }
 
 // TestCompactionRecordsTheShortenedResults pins that the tool results a
-// compaction replaced are recorded by identity, so a resumed session sends the
-// same context the running one did rather than the full results again.
+// compaction replaced are recorded by identity, so a resumed conversation sends
+// the same context the running one did rather than the full results again.
 func TestCompactionRecordsTheShortenedResults(t *testing.T) {
-	root := t.TempDir()
+	st, _ := openStore(t)
 	cwd := t.TempDir()
-	s, err := New(root, cwd, "shortened", "m")
+	s, _, err := st.Open(cwd, "shortened", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,12 +271,8 @@ func TestCompactionRecordsTheShortenedResults(t *testing.T) {
 	}, through); err != nil {
 		t.Fatal(err)
 	}
-	path := s.Path
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
 
-	loaded, err := Load(path)
+	loaded, _, err := st.Open(cwd, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,277 +296,102 @@ func TestShortenedResultsMissingFromTheLogAreSkipped(t *testing.T) {
 	}
 }
 
-// TestProjectDirIsValidOnEveryPlatform pins the bucket rule: the name has to be
-// usable as a directory wherever sal runs, and a Windows path carries a colon
-// that a file name cannot hold.
-func TestProjectDirIsValidOnEveryPlatform(t *testing.T) {
-	root := t.TempDir()
-	for _, cwd := range []string{
-		`C:\work\project`,
-		`C:\`,
-		`/home/me/work/project`,
-		`/`,
-		`/work/spaces and (parens)/x`,
-	} {
-		got := filepath.Base(ProjectDir(root, cwd))
-		if got == "" || got == "." || got == ".." {
-			t.Fatalf("ProjectDir(%q) produced %q", cwd, got)
-		}
-		for _, r := range got {
-			if strings.ContainsRune(`<>:"/\|?*`, r) {
-				t.Fatalf("ProjectDir(%q) = %q, which contains %q and is not a valid file name", cwd, got, r)
-			}
-		}
-		// Two different directories must not share one bucket.
-		other := filepath.Base(ProjectDir(root, cwd+"-other"))
-		if other == got {
-			t.Fatalf("ProjectDir collapsed %q and its neighbour into %q", cwd, got)
-		}
-	}
-	// The bucket is actually writable on the host running the suite.
-	dir := ProjectDir(root, t.TempDir())
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("cannot create the project bucket %s: %v", dir, err)
-	}
-}
-
-// TestOneDirectoryIsOneBucketThroughASymlink covers the case macOS exposes: the
-// working directory can be spelled two ways, one through a symbolic link (a
-// temporary directory is /var/... but resolves to /private/var/...), and both
-// spellings must find the same sessions. Linux reaches a project behind a link
-// the same way.
-func TestOneDirectoryIsOneBucketThroughASymlink(t *testing.T) {
-	root := t.TempDir()
+// TestOneDirectoryIsOneConversationThroughASymlink pins that the identity of a
+// directory is physical: two spellings of the same directory continue the same
+// conversation.
+func TestOneDirectoryIsOneConversationThroughASymlink(t *testing.T) {
+	st, _ := openStore(t)
 	real := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(real, link); err != nil {
-		t.Skipf("symbolic links are unavailable: %v", err)
+		t.Skipf("symlinks are unavailable here: %v", err)
 	}
 
-	if ProjectDir(root, real) != ProjectDir(root, link) {
-		t.Fatalf("the same directory produced two buckets:\n  %s\n  %s",
-			ProjectDir(root, real), ProjectDir(root, link))
-	}
-
-	sess, err := New(root, link, "through a link", "m")
+	first, _, err := st.Open(real, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = sess.AppendMessage(agent.NewUserMessage("hi"))
-	_ = sess.Close()
-
-	// Listing finds what was written through the link.
-	infos, err := List(root)
+	second, resumed, err := st.Open(link, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(infos) != 1 || infos[0].ID != sess.ID {
-		t.Fatalf("the session was not found through the other spelling: %+v", infos)
+	if !resumed || second.ID != first.ID {
+		t.Fatalf("the same directory through a link became another conversation: %s vs %s", first.ID, second.ID)
 	}
-	// And its recorded cwd is the physical path, so the cross-bucket filter
-	// recognises it too.
-	if infos[0].Cwd != ProjectDir("", real) && filepath.Base(infos[0].Cwd) == "" {
-		t.Fatalf("recorded cwd = %q", infos[0].Cwd)
-	}
-	all, err := List(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 1 {
-		t.Fatalf("the listing did not recognise the directory: %+v", all)
+	if all, err := st.List(); err != nil || len(all) != 1 {
+		t.Fatalf("expected one conversation, got %+v (%v)", all, err)
 	}
 }
 
-// TestOneDirectoryOneFiles covers the model: a directory has one conversation at
-// a fixed path, reopened rather than duplicated.
-func TestOneDirectoryOneFile(t *testing.T) {
-	root := t.TempDir()
-	cwd := t.TempDir()
-
-	first, resumed, err := Open(root, cwd, "", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resumed {
-		t.Fatal("the first open must create")
-	}
-	_ = first.AppendMessage(agent.NewUserMessage("remember me"))
-	firstID := first.ID
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if want := Path(root, cwd); first.Path != want {
-		t.Fatalf("session path = %s, want %s", first.Path, want)
-	}
-
-	second, resumed, err := Open(root, cwd, "", "m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resumed {
-		t.Fatal("a second open must resume")
-	}
-	if second.ID != firstID {
-		t.Fatalf("a second open created a new session (%s -> %s)", firstID, second.ID)
-	}
-	if len(second.Messages) != 1 || second.Messages[0].Content != "remember me" {
-		t.Fatalf("the conversation was not restored: %+v", second.Messages)
-	}
-	_ = second.Close()
-
-	// Reopening does not add a second file.
-	entries, err := os.ReadDir(filepath.Dir(second.Path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected one file in the bucket, got %d: %v", len(entries), entries)
-	}
-}
-
-// TestArchiveKeepsThePreviousConversation covers --new: starting over moves the
-// file aside instead of deleting it.
+// TestArchiveKeepsThePreviousConversation covers --new: starting over archives
+// the conversation instead of deleting it.
 func TestArchiveKeepsThePreviousConversation(t *testing.T) {
-	root := t.TempDir()
+	st, _ := openStore(t)
 	cwd := t.TempDir()
 
-	s, _, err := Open(root, cwd, "", "m")
+	old, _, err := st.Open(cwd, "the old one", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = s.AppendMessage(agent.NewUserMessage("the old work"))
-	oldPath := s.Path
-	if err := s.Close(); err != nil {
+	if err := old.AppendMessage(agent.NewUserMessage("the old work")); err != nil {
 		t.Fatal(err)
 	}
-
-	archived, err := Archive(root, cwd)
+	archivedID, err := st.Archive(cwd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if archived == "" {
-		t.Fatal("Archive reported nothing to move")
-	}
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Fatalf("the conversation is still at %s", oldPath)
-	}
-	kept, err := Load(archived)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kept.Messages) != 1 || kept.Messages[0].Content != "the old work" {
-		t.Fatalf("the archived conversation was not readable: %+v", kept.Messages)
+	if archivedID != old.ID {
+		t.Fatalf("archived %q, want %q", archivedID, old.ID)
 	}
 
 	// After archiving, opening starts fresh.
-	fresh, resumed, err := Open(root, cwd, "", "m")
+	fresh, resumed, err := st.Open(cwd, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fresh.Close()
 	if resumed {
 		t.Fatal("opening after --new must start over")
 	}
 	if len(fresh.Messages) != 0 {
 		t.Fatalf("the new conversation carries messages: %+v", fresh.Messages)
 	}
-}
-
-// TestOpenAdoptsThePreviousLayout covers a directory written by an older
-// release: the newest timestamped file becomes the conversation, and the rest
-// are left alone.
-func TestOpenAdoptsThePreviousLayout(t *testing.T) {
-	root := t.TempDir()
-	cwd := t.TempDir()
-	dir := ProjectDir(root, cwd)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
+	if fresh.ID == old.ID {
+		t.Fatal("the new conversation reused the archived id")
 	}
-	writeLegacy := func(name, content string) string {
-		t.Helper()
-		s := &Session{ID: "legacy-" + name, Cwd: canonicalDir(cwd), Path: filepath.Join(dir, name)}
-		if err := s.open(); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.write(Entry{Type: "session", SessionID: s.ID, Cwd: s.Cwd}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.write(Entry{Type: "message", Message: &agent.Message{Role: agent.RoleUser, Content: content}}); err != nil {
-			t.Fatal(err)
-		}
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
-		return s.Path
-	}
-	writeLegacy("20260101-000000-aaaaaaaa.jsonl", "older")
-	newest := writeLegacy("20260102-000000-bbbbbbbb.jsonl", "newest")
 
-	s, resumed, err := Open(root, cwd, "", "m")
+	// The archived conversation is kept, readable by id, and marked.
+	kept, err := st.Load(old.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	if !resumed {
-		t.Fatal("an adopted conversation counts as resumed")
+	if len(kept.Messages) != 1 || kept.Messages[0].Content != "the old work" {
+		t.Fatalf("the archived conversation was not readable: %+v", kept.Messages)
 	}
-	if len(s.Messages) != 1 || s.Messages[0].Content != "newest" {
-		t.Fatalf("did not adopt the newest file: %+v", s.Messages)
+	if !kept.Archived {
+		t.Fatal("the archived conversation is not marked as archived")
 	}
-	if _, err := os.Stat(newest); !os.IsNotExist(err) {
-		t.Fatalf("the adopted file should have moved to %s", Path(root, cwd))
-	}
-	// The older one is untouched.
-	if _, err := os.Stat(filepath.Join(dir, "20260101-000000-aaaaaaaa.jsonl")); err != nil {
-		t.Fatalf("the older conversation was disturbed: %v", err)
-	}
-}
-
-// TestEmptyFileIsNotAConversation covers a session file whose creation was
-// interrupted before the header was written: the leftover must not be resumed
-// as a conversation with no id and no directory. Only a file that has sat
-// header-less counts as one; a file created just now may still be getting its
-// header from another process.
-func TestEmptyFileIsNotAConversation(t *testing.T) {
-	root := t.TempDir()
-	cwd := t.TempDir()
-	path := Path(root, cwd)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// An interrupted write is old by the time anyone starts sal there.
-	old := time.Now().Add(-time.Minute)
-	if err := os.Chtimes(path, old, old); err != nil {
-		t.Fatal(err)
-	}
-
-	s, resumed, err := Open(root, cwd, "wanted", "m")
+	infos, err := st.List()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	if resumed {
-		t.Fatal("a file with no header is a leftover, not a conversation")
+	var sawCurrent, sawArchived bool
+	for _, info := range infos {
+		switch info.ID {
+		case old.ID:
+			sawArchived = info.Archived
+		case fresh.ID:
+			sawCurrent = info.Current && !info.Archived
+		}
 	}
-	if s.ID == "" || s.ID == "session" {
-		t.Fatalf("the new conversation has no id of its own: %q", s.ID)
-	}
-	if s.Cwd == "" {
-		t.Fatal("the new conversation did not record its directory")
-	}
-	if s.Name != "wanted" {
-		t.Fatalf("the new conversation lost its name: %q", s.Name)
+	if !sawArchived || !sawCurrent {
+		t.Fatalf("the listing should show one archived and one current: %+v", infos)
 	}
 }
 
-// TestConcurrentCreatesLeaveOneConversation covers two sal processes starting
-// in the same directory at once: one creates the conversation, the other opens
-// it, and the file holds a single header either way.
-func TestConcurrentCreatesLeaveOneConversation(t *testing.T) {
-	root := t.TempDir()
+// TestOpenReturnsTheDirectorysConversationUnderConcurrency pins the invariant
+// "one directory, one conversation": simultaneous starts agree on one id.
+func TestOpenReturnsTheDirectorysConversationUnderConcurrency(t *testing.T) {
+	st, _ := openStore(t)
 	cwd := t.TempDir()
 
 	const starters = 4
@@ -513,18 +402,11 @@ func TestConcurrentCreatesLeaveOneConversation(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			sessions[i], _, errs[i] = Open(root, cwd, "rival", "m")
+			sessions[i], _, errs[i] = st.Open(cwd, "rival", "m")
 		}(i)
 	}
 	wg.Wait()
 
-	// Close whatever was opened, even when the assertions below fail: an open
-	// handle keeps the temporary directory from being removed on Windows.
-	for _, s := range sessions {
-		if s != nil {
-			defer s.Close()
-		}
-	}
 	ids := map[string]bool{}
 	for i, err := range errs {
 		if err != nil {
@@ -535,100 +417,278 @@ func TestConcurrentCreatesLeaveOneConversation(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatalf("the starters disagree about the conversation: %v", ids)
 	}
-	for _, s := range sessions {
-		_ = s.Close()
-	}
-
-	data, err := os.ReadFile(Path(root, cwd))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := strings.Count(string(data), `"type":"session"`); n != 1 {
-		t.Fatalf("the file holds %d session headers, want 1:\n%s", n, data)
+	if all, err := st.List(); err != nil || len(all) != 1 {
+		t.Fatalf("expected one stored conversation, got %+v (%v)", all, err)
 	}
 }
 
-// TestArchiveIsNotListed covers --new: the conversation moved aside stays on
-// disk but is no longer the directory's entry in the listing.
-func TestArchiveIsNotListed(t *testing.T) {
-	root := t.TempDir()
+// TestNewArchivesAndStartsOver covers the store's "start over" in one step.
+func TestNewArchivesAndStartsOver(t *testing.T) {
+	st, _ := openStore(t)
 	cwd := t.TempDir()
 
-	old, _, err := Open(root, cwd, "the old one", "m")
+	first, _, err := st.Open(cwd, "first", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = old.AppendMessage(agent.NewUserMessage("old work"))
-	if err := old.Close(); err != nil {
-		t.Fatal(err)
-	}
-	archived, err := Archive(root, cwd)
+	_ = first.AppendMessage(agent.NewUserMessage("old"))
+
+	fresh, err := st.New(cwd, "second", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Without a new conversation yet, the directory has none to show.
-	if infos, err := List(root); err != nil {
-		t.Fatal(err)
-	} else if len(infos) != 0 {
-		t.Fatalf("an archived conversation was listed: %+v", infos)
+	if fresh.ID == first.ID || len(fresh.Messages) != 0 {
+		t.Fatalf("New should start a fresh conversation: %+v", fresh)
 	}
+	if kept, err := st.Load(first.ID); err != nil || !kept.Archived {
+		t.Fatalf("the previous conversation should be archived: %+v %v", kept, err)
+	}
+}
 
-	fresh, err := New(root, cwd, "the new one", "m")
+// TestLoadAcceptsTheShortIdThatListingsShow pins that --session can take the
+// 8-character id a person reads from --list-sessions.
+func TestLoadAcceptsTheShortIdThatListingsShow(t *testing.T) {
+	st, _ := openStore(t)
+	cwd := t.TempDir()
+	s, _, err := st.Open(cwd, "", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = fresh.AppendMessage(agent.NewUserMessage("new work"))
-	if err := fresh.Close(); err != nil {
+	short := s.ID[:8]
+	got, err := st.Load(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != s.ID {
+		t.Fatalf("loaded %q for prefix %q, want %q", got.ID, short, s.ID)
+	}
+	if _, err := st.Load("ffffffffffffffff"); err == nil {
+		t.Fatal("an unknown id should be an error")
+	}
+}
+
+// TestSchemaIsVersionedAndForwardCompatible covers the migration contract: a
+// fresh database is stamped with the current version, reopening is a no-op, and
+// a database from a newer release is refused rather than opened.
+func TestSchemaIsVersionedAndForwardCompatible(t *testing.T) {
+	root := t.TempDir()
+	st, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("fresh database is at version %d, want %d", version, schemaVersion)
+	}
+	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	infos, err := List(root)
+	// Reopening keeps the version and the data.
+	if st, err = OpenStore(root); err != nil {
+		t.Fatalf("reopening should succeed: %v", err)
+	}
+	if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("reopening changed the version to %d", version)
+	}
+	_ = st.Close()
+
+	// A database written by a newer sal is refused, and not modified.
+	raw, err := sql.Open("sqlite", "file:"+DBPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 99`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	if _, err := OpenStore(root); err == nil {
+		t.Fatal("a database from a newer release should be refused")
+	} else if !strings.Contains(err.Error(), "99") {
+		t.Fatalf("the error should name the version it found: %v", err)
+	}
+}
+
+// TestMessagesAreCommittedWithTheirConversation pins that a stored message
+// survives a second process opening the same database, which is what makes a
+// finished turn durable.
+func TestMessagesAreCommittedWithTheirConversation(t *testing.T) {
+	st, root := openStore(t)
+	cwd := t.TempDir()
+	s, _, err := st.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendMessage(agent.NewUserMessage("durable")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second connection, as another sal process would have.
+	other, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	got, resumed, err := other.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed {
+		t.Fatal("the second process should continue the conversation")
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Content != "durable" {
+		t.Fatalf("the committed message is missing: %+v", got.Messages)
+	}
+}
+
+// TestLegacyJSONLIsImportedOnce covers the move from the previous layout: the
+// newest file of each bucket becomes the directory's conversation, the files are
+// left alone, and a second start imports nothing again.
+func TestLegacyJSONLIsImportedOnce(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+	dir := filepath.Join(root, "some-bucket")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacy := func(name, sessionID, content string, mod time.Time) string {
+		t.Helper()
+		lines := []string{
+			`{"type":"session","id":"h","timestamp":"2026-01-01T00:00:00Z","sessionId":"` + sessionID + `","cwd":"` + cwd + `","model":"m","name":"` + sessionID + `"}`,
+			`{"type":"message","id":"m1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"` + content + `"}}`,
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	oldPath := writeLegacy("20260101-000000-aaaaaaaa.jsonl", "aaaaaaaa00000000", "older", time.Now().Add(-time.Hour))
+	newPath := writeLegacy("20260102-000000-bbbbbbbb.jsonl", "bbbbbbbb00000000", "newest", time.Now())
+
+	st, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	infos, err := st.List()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(infos) != 1 {
-		t.Fatalf("expected one conversation per directory, got %+v", infos)
+		t.Fatalf("the newest file should become the one conversation, got %+v", infos)
 	}
-	if infos[0].Path != Path(root, cwd) {
-		t.Fatalf("listed %s, want the current conversation %s (archived: %s)", infos[0].Path, Path(root, cwd), archived)
+	if infos[0].ID != "bbbbbbbb00000000" {
+		t.Fatalf("imported %q, want the newest file's session", infos[0].ID)
 	}
-	if infos[0].Name != "the new one" {
-		t.Fatalf("listed the wrong conversation: %+v", infos[0])
+	s, resumed, err := st.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed || s.ID != "bbbbbbbb00000000" {
+		t.Fatalf("opening should continue the imported conversation: %+v", s)
+	}
+	if len(s.Messages) != 1 || s.Messages[0].Content != "newest" {
+		t.Fatalf("imported messages are missing: %+v", s.Messages)
+	}
+	if s.UpdatedAt.IsZero() {
+		t.Fatal("an imported conversation should keep a usable update time")
+	}
+	// The listing must not print a zero date for an imported conversation.
+	if infos[0].UpdatedAt.IsZero() {
+		t.Fatal("the listing shows no date for the imported conversation")
+	}
+
+	// Neither file is modified or removed.
+	for _, p := range []string{oldPath, newPath} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("the legacy file should be left alone: %v", err)
+		}
+	}
+
+	// Importing is one-time: a conversation created later is not overwritten by
+	// a second start.
+	if _, err := st.New(cwd, "after import", "m"); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	again, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	got, resumed, err := again.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed || got.Name != "after import" {
+		t.Fatalf("the second start re-imported over the current conversation: %+v", got)
 	}
 }
 
-// TestOpenWaitsForAHeaderBeingWritten covers the moment between one process
-// claiming the session file and writing its header: a second process that opens
-// it then must end up in the same conversation, not in a header-less leftover.
-func TestOpenWaitsForAHeaderBeingWritten(t *testing.T) {
+// TestLegacyFilesAppearingLaterAreStillImported pins that a store created
+// before an old file exists does not mark the import as finished, so a person
+// who upgrades, runs sal once on an empty root, and only then points
+// --session-dir at their old files still gets them.
+func TestLegacyFilesAppearingLaterAreStillImported(t *testing.T) {
 	root := t.TempDir()
 	cwd := t.TempDir()
-	path := Path(root, cwd)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// The claim: the file exists, empty, as New leaves it for an instant.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	header := `{"type":"session","id":"h","timestamp":"` + now() + `","sessionId":"thefirst"}` + "\n"
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		_, _ = f.WriteString(header)
-		_ = f.Close()
-	}()
 
-	s, resumed, err := Open(root, cwd, "second", "m")
+	// First start: nothing stored yet.
+	st, err := OpenStore(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	if !resumed {
-		t.Fatal("the second opener should join the conversation being created")
+	if _, _, err := st.Open(t.TempDir(), "", "m"); err != nil {
+		t.Fatal(err)
 	}
-	if s.ID != "thefirst" {
-		t.Fatalf("joined %q, want the conversation being written", s.ID)
+	_ = st.Close()
+
+	// The old files appear afterwards.
+	dir := filepath.Join(root, "bucket")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"type":"session","id":"h","timestamp":"2026-01-01T00:00:00Z","sessionId":"cccccccc00000000","cwd":"` + cwd + `","model":"m"}`,
+		`{"type":"message","id":"m1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"late"}}`,
+	}
+	if err := os.WriteFile(filepath.Join(dir, "20260101-000000-cccccccc.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s, resumed, err := st.Open(cwd, "", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed || s.ID != "cccccccc00000000" || len(s.Messages) != 1 {
+		t.Fatalf("the late legacy file was not imported: %+v (resumed %v)", s, resumed)
+	}
+}
+
+// TestListingDoesNotCreateAStore pins that reading a machine with nothing stored
+// leaves it untouched, so `--list-sessions` never creates a database.
+func TestListingDoesNotCreateAStore(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "nothing-here")
+	if Exists(root) {
+		t.Fatal("a directory that does not exist cannot hold a store")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("the root should not have been created: %v", err)
 	}
 }

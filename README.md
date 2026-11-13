@@ -38,8 +38,9 @@ git clone https://github.com/bothought/sal && cd sal && go build -o sal .
 ```
 
 Building needs Go 1.27.1 or newer (see `go.mod`); `go build` produces a single
-static binary with no runtime dependencies. Release binaries for Linux, macOS
-and Windows (amd64 and arm64) are attached to each
+static binary with no runtime dependencies — the SQLite engine is pure Go and
+compiled in, so there is no C toolchain and no shared library to install.
+Release binaries for Linux, macOS and Windows (amd64 and arm64) are attached to each
 [release](https://github.com/bothought/sal/releases).
 
 ### Upgrading
