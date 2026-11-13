@@ -21,7 +21,7 @@ main                    CLI: flags, precedence, mode selection, wiring
 internal/agent          the agent loop (the core of the program)
 internal/provider       OpenAI-compatible streaming client
 internal/tools          the seven built-in tools and their registry
-internal/session        JSONL session storage
+internal/session        conversation storage (SQLite)
 internal/tui            terminal UI
 internal/web            HTTP + SSE console, with its page embedded
 internal/config         config file and XDG path resolution
@@ -53,7 +53,7 @@ stays small:
 - **The front ends are adapters, not owners.** Each declares the small slice of
   the agent it drives, rather than depending on the concrete loop, so both are
   testable against a scripted fake. Neither front end computes a figure, decides
-  what the model is sent, or touches a session file.
+  what the model is sent, or touches the database.
 - **Sessions are injected.** The main package builds one set of callbacks
   (describe, identify, start over, open another directory's conversation) and
   hands the same ones to both front ends, so `/new` means the same thing in each
@@ -160,41 +160,38 @@ truncated.
 
 ## 5. Sessions
 
-A session is an append-only JSONL file, and the format is the contract:
+The session package owns conversation storage; the schema, the versioning rules
+and the invariants are `design/technical/session-store`. What matters at this
+level is the shape it puts between the loop and the disk:
 
-- Every line is one entry with a type, an id, a timestamp, and the payload that
-  type carries: the header, a message, a rename, a model change, a compaction.
-- The header records the session id, the working directory, the model and the
-  name. A message entry embeds the neutral message type, which is why a stored
-  conversation replays straight into the agent.
-- **A working directory names exactly one session.** The file lives at a fixed
-  path inside a bucket derived from the canonical working directory, so opening
-  the program there finds it without a lookup, a listing or a choice. The bucket
-  name must be valid on every platform the program runs on, which makes the
-  derivation an explicit rule rather than a separator replacement: a Windows
-  drive colon is rejected by the filesystem. Canonicalising the directory first
-  (resolving links) is what keeps one directory from becoming two buckets.
-- **Writes happen when the conversation changes**, not at exit: one append-only
-  handle behind a mutex, one line per change. A process that dies mid-write
-  leaves a file whose truncated last line is skipped when it is read back, and a
-  process that dies between turns loses nothing. Streamed text is not written
-  incrementally; the finished message is.
-- `--new` moves the file aside rather than deleting it, so starting over is
-  reversible and no code path destroys a conversation.
-- **The layout change is adopted, not migrated.** When the fixed path is absent
-  but timestamped files exist in the same bucket, the newest becomes the
-  conversation; nothing is rewritten, so a newer release that still lists
-  sessions, or a person with the old files, sees what was there.
-- A listing across the machine is a different query — every bucket, filtered by
-  the recorded directory — and is used only where a person asked for one. It is
-  proportional to the bytes stored, because summarising a file means parsing it.
+- **A conversation is a row, not a file.** Every conversation lives in one
+  embedded database: the conversation, its messages in append order, and its
+  compaction. A message embeds the neutral message type, so a stored conversation
+  replays straight into the agent.
+- **A working directory names exactly one conversation**, declared as a unique
+  index on the canonical directory. Canonicalising first (resolving links) is
+  what keeps one directory from appearing twice, and the database — not the
+  program — is what refuses a second conversation for it.
+- **Writes happen when the conversation changes**, not at exit, one transaction
+  per change. A process that dies between turns loses nothing, and a process
+  that dies mid-write leaves the previous state rather than a fragment. Streamed
+  text is not written incrementally; the finished message is.
+- **Archiving keeps the conversation.** Starting over clears the directory's
+  pointer and marks the conversation archived; nothing is deleted, and the
+  conversation can still be opened by id.
+- **The schema is versioned.** The store applies its known migrations on start
+  and refuses a database written by a newer release.
+- **The previous layout is imported once**, from the JSONL files an older
+  release wrote, without modifying them.
+- The store is the only writer: no front end and not the loop touches the
+  database, and a front end knows nothing about the layout.
 
-A compaction is one more entry, and it is what makes a resumed session continue
-from the summary instead of replaying the whole log. Because the log stays
-complete, the entry has to say which messages the summary replaces and which
-tool results inside the kept tail were shortened; both are recorded by message
-identity rather than position, so they survive any change in how messages are
-counted.
+A compaction is one more row, and it is what makes a resumed conversation
+continue from the summary instead of replaying the whole history. Because the
+history stays complete, the row has to say which messages the summary replaces
+and which tool results inside the kept tail were shortened; both are recorded by
+message identity rather than position, so they survive any change in how
+messages are counted.
 
 ## 6. Front ends
 

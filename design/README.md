@@ -19,6 +19,7 @@ design/
   technical/                 how sal is built
     architecture/            the current technical architecture
     context-compaction/      the technical design of context-management
+    session-store/           the technical design of conversation storage
 ```
 
 The split is strict: a **feature** document answers "what does the user get, and
@@ -83,6 +84,7 @@ The two kinds are written at deliberately different depths:
 |---|---|
 | [architecture](technical/architecture/README.md) | Package layout, the responsibility of each part and the interfaces between them, the data formats, the concurrency model, and the testing strategy. |
 | [context-compaction](technical/context-compaction/README.md) | The technical design of `features/context-management`: where the policy lives, how the four modes share it, what flows between the loop, the session and the front ends, and which invariants the structure guarantees. |
+| [session-store](technical/session-store/README.md) | The technical design of conversation storage: the database schema, why it replaces per-session files, how the schema is versioned and migrated, and the invariants that keep the store the only writer. |
 | [self-upgrade](technical/self-upgrade/README.md) | The technical design of `features/self-upgrade`: release discovery, asset selection and verification, platform replacement, the release pipeline, and the invariants that keep a failed upgrade inert. |
 
 The index lists every item, written or not. An item whose document does not

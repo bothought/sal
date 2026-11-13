@@ -232,7 +232,7 @@ retry of the summary is not mistaken for a retry of the user's turn.
 
 The summary request itself is sent again to the provider, so it is billed like
 any other request; it is not shown in the transcript, and it does not appear as
-an assistant message in the session file.
+an assistant message in the stored conversation.
 
 ### 4.2 What is kept verbatim
 
@@ -495,7 +495,7 @@ know the limit, and the interfaces have to be told about it.
   the user the same text, which is what makes the risk auditable rather than
   hidden.
 - Compaction is lossy. Details the summary omits are gone from the model's
-  context for the rest of the session, although they remain in the session file.
+  context for the rest of the session, although they remain in the stored conversation.
 - Compaction sends part of the conversation to the provider a second time, as a
   summarization request; the privacy properties are those of any other request.
 
@@ -519,7 +519,7 @@ Not part of this feature, and not to be added by implementing it:
 - **Selective per-message pinning, editing, or re-fetching.** The user can guide
   the summary with `/compact <instructions>`, and nothing more.
 - **Undo.** A compaction cannot be reversed within the active context; the
-  original messages remain readable in the session file.
+  original messages remain readable in the stored conversation.
 - **Cost accounting.** Token counts are reported, as they are today; money is
   not.
 - **Automatic model switching** to a larger-window model when the context fills.
@@ -547,6 +547,6 @@ this document is the reference for the new text:
 
 The technical side — how the limit is discovered and cached, how the estimate is
 computed and corrected, where the threshold check sits in the agent loop, how a
-compaction entry is represented in the JSONL format, and how the front ends
+compaction is represented in the stored conversation, and how the front ends
 render the new state — belongs to `design/technical/context-compaction`, which
 is written before the code that depends on it.

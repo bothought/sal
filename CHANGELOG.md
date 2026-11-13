@@ -9,34 +9,40 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - **One conversation per directory.** A working directory now owns exactly one
-  stored session at a fixed path (`sessions/<slug>/session.jsonl`) and opening
-  sal there continues it, so there is nothing to list or switch between. Removed:
-  `/switch`, `/sessions`, the terminal session picker, the web console's session
-  menu, `-c`/`--continue`, and `--continue-all`. Added: `--new` (move the stored
-  session aside and start over), `--dir <path>` (work on another directory's
-  conversation), and `/new [path]` in both consoles. `sal --list-sessions` still
-  prints every conversation on the machine, now by directory.
-- An existing conversation carries over: when the fixed path is absent, the
-  newest timestamped file in that directory's bucket is adopted. Nothing is
-  rewritten or deleted.
+  stored conversation and opening sal there continues it, so there is nothing to
+  list or switch between. Removed: `/switch`, `/sessions`, the terminal session
+  picker, the web console's session menu, `-c`/`--continue`, and
+  `--continue-all`. Added: `--new` (archive the stored conversation and start
+  over), `--dir <path>` (work on another directory's conversation), and
+  `/new [path]` in both consoles. `sal --list-sessions` still prints every
+  conversation on the machine, now by directory.
+
+### Storage in SQLite
+
+- **Conversations are stored in SQLite instead of one JSONL file each.** One
+  database at `$XDG_DATA_HOME/sal/sessions/sal.db` holds every conversation,
+  its messages and its compaction. The one-conversation-per-directory rule is
+  a unique index there, each write is its own transaction, and the schema is
+  versioned: an older database is migrated forward on start, and one written by
+  a newer release is refused rather than opened.
+- `--new` archives a conversation instead of moving a file aside; archived
+  conversations are still stored and can be opened with `--session <id>`.
+  `--session` now takes an id rather than a file path, and `--list-sessions`
+  marks archived conversations.
+- Conversations an older release wrote as JSONL files are imported once, on
+  first start. The files are left on disk untouched.
+- Removed the per-session file layout and the machinery that guarded it:
+  exclusive file creation, waiting for a concurrent writer's header, tolerating
+  a truncated last line, and choosing the current file among timestamped ones.
+- `/new` now refuses to run while a turn is in flight in both consoles, instead
+  of only in the browser: the turn's messages belong to the conversation being
+  archived.
 
 ### Fixed
 
-- **Two sal processes starting in the same directory can no longer become two
-  conversations.** The session file is claimed exclusively and its header is
-  written at once, and the process that loses the race opens the conversation
-  the other one created instead of writing a second header into the same file.
-  A reader that finds the file before the header is on disk waits for it.
-- **A file with no session header is not treated as a conversation.** An
-  interrupted first write can leave `session.jsonl` empty; opening it now starts
-  the directory's conversation properly rather than resuming an entry with no
-  id and no recorded directory. Such leftovers are also left out of
-  `--list-sessions`.
-- `--list-sessions` no longer offers a conversation `--new` moved aside; the
-  archive stays on disk but is not the directory's entry.
-- A restart no longer appears to lose the conversation. The session is written
-  as each message is appended, so finished turns are on disk before the process
-  exits; the earlier behaviour required `-c` to find them again.
+- A restart no longer appears to lose the conversation. Each message is saved
+  as it is appended, so finished turns are stored before the process exits; the
+  earlier behaviour required `-c` to find them again.
 
 ## [0.1.4] - 2026-11-05
 

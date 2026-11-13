@@ -146,31 +146,37 @@ directory it belongs to.
 
 ### 5.1 Storage
 
-A session is a JSONL file, one entry per line, under
-`$XDG_DATA_HOME/sal/sessions/<slug>/session.jsonl`, where `<slug>` is the
-canonical working directory flattened into a valid file name (`C:\work\project`
-becomes a name Windows accepts). `--session-dir` / `session_dir` /
-`$SAL_SESSION_DIR` override the root. `--no-session` disables storage; the
-conversation then lives only in memory.
+Conversations live in one SQLite database,
+`$XDG_DATA_HOME/sal/sessions/sal.db`. `--session-dir` / `session_dir` /
+`$SAL_SESSION_DIR` move the store, and the database file lives in the named
+directory. `--no-session` disables storage; the conversation then lives only in
+memory and no database is created.
 
-The file starts with a header (session id, working directory, model, name) and
-records each entry as it happens. It is append-only, so a process killed
-mid-write leaves a readable file; a truncated last line is skipped when it is
-read back.
+Keeping every conversation in one database, rather than one file each, is what
+makes the rest of this section simple: a directory's conversation is a row, its
+messages are rows, and the database — not the program — decides who may create
+it and what a write costs. Two sal processes in the same directory cannot end up
+with two conversations, and a write is never half applied.
 
-A file written before this layout — an older release stored many timestamped
-sessions per directory — is not rewritten or deleted. The newest of them is
-adopted as that directory's conversation on first use, so an existing
-conversation carries over; the rest stay where they are and can be opened with
-`--session`.
+The schema carries a version. On startup the program brings the database up to
+the version it expects by applying the migrations it knows, one transaction
+each; a database written by a *newer* release than the running one is refused
+with a clear error instead of being opened and damaged. The version and the
+migrations are documented in `design/technical/session-store`.
+
+A conversation stored before this layout — an older release wrote one JSONL file
+per session under the same directory tree — is imported once, on first start
+with the new storage. The newest file of each directory becomes that
+directory's conversation, and every file is left on disk untouched. The import
+runs in one transaction, so an interrupted import does not duplicate anything,
+and a database that has already imported gains nothing on a later start.
 
 ### 5.2 Saving
 
-Every message is written when it enters the conversation, not at exit: an
-assistant answer, a tool result, a compaction, a rename. A crash, a `kill -9`, or
-closing the terminal therefore loses at most the turn that was in flight — the
-turns before it are already on disk. Two consequences are visible and worth
-stating:
+Every message is saved when it enters the conversation, not at exit: an
+assistant answer, a tool result, a compaction, a rename, a model change. A
+crash, a `kill -9`, or closing the terminal therefore loses at most the turn
+that was in flight. Two consequences are visible and worth stating:
 
 - Text streamed during a turn is not saved incrementally; the finished assistant
   message is saved when the turn completes. A process killed mid-answer keeps the
@@ -185,30 +191,33 @@ stating:
 | Flag | Effect |
 |---|---|
 | `--dir <path>` | Run with `<path>` as the working directory, and therefore as the conversation's identity. The tools are rooted there too. |
-| `sal --new` | Start over in the current directory: the stored session is moved aside (never deleted) and a fresh one begins. |
+| `sal --new` | Start over in the current directory: the stored conversation is archived (never deleted) and a fresh one begins. |
 
 `/new` inside a console does the same, and needs the directory to be named when
 the console may be showing another one: `/new <path>` switches to the session
 stored for `<path>`, creating it when there is none. `/new` with no argument
 resets the current directory's conversation.
 
-### 5.4 What a stored session carries
+### 5.4 What a stored conversation carries
 
-Each session has an id (16 hex characters, shown as its first 8), a display name
-(`--name`/`name`, default the id prefix), a model, the working directory, a
-message count and an update time. A compacted session says so, because its
-active context is shorter than its file.
+Each conversation has an id (16 hex characters, shown as its first 8), a display
+name (`--name`/`name`, default the id prefix), a model, the working directory, a
+message count and an update time. A compacted conversation says so, because its
+active context is shorter than its history. An archived conversation keeps all
+of that and is marked as archived; it is no longer what its directory continues
+and is not opened by starting sal there, but it is still stored and can be
+opened with `--session <id>`.
 
 ### 5.5 Commands
 
 | Command | Effect |
 |---|---|
 | `sal` | Continue this directory's conversation, starting one if there is none. |
-| `sal --new` | Move the stored session aside and start fresh. |
+| `sal --new` | Archive the stored conversation and start fresh. |
 | `sal --dir <path>` | Continue (or start) the conversation for `<path>`. |
-| `sal --session <file>` | Open a specific file, for recovery or inspection. |
-| `sal --list-sessions` | Print every stored conversation on the machine, with its directory. |
-| `/session` | Describe the current session: id, directory, file, message count. |
+| `sal --session <id>` | Open that stored conversation, for recovery or inspection. |
+| `sal --list-sessions` | Print every stored conversation on the machine, with its directory; archived ones are marked. |
+| `/session` | Describe the current session: id, directory, message count. |
 | `/new [path]` | Start over here, or continue `<path>`'s conversation. |
 
 ## 6. Commands and configuration

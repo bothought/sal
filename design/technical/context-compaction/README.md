@@ -112,7 +112,7 @@ next request's own outcome is what the user should see.
 ## 4. Invariants
 
 - **The conversation the agent holds is never shortened.** History stays
-  complete, and so does the session file. Compaction records that a prefix of
+  complete, and so does the stored conversation. Compaction records that a prefix of
   the history is represented by a summary; what changes is the view the request
   is built from, not the record.
 - **That view is built in one place.** Everything the model is sent — the

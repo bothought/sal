@@ -22,7 +22,7 @@ skill, package, and provider-matrix machinery.
   status, context-window use, and token usage.
 - **Four interfaces:** interactive TUI, `--web` browser console, `--print`
   one-shot, and `--mode json` for a machine-readable event stream.
-- **One conversation per directory**, stored as a JSONL file and continued
+- **One conversation per directory**, stored in a local SQLite database and continued
   automatically. Every message is written as it happens.
 - **Context window.** The footer shows `ctx used/limit` for the next request,
   and older messages are summarized automatically when the window fills (or on
@@ -180,7 +180,7 @@ variables are ignored, as the XDG specification requires.
 
 ```
 $XDG_CONFIG_HOME/sal/config.toml        (or config.json)   configuration
-$XDG_DATA_HOME/sal/sessions/                              session files
+$XDG_DATA_HOME/sal/sessions/sal.db                       conversations (SQLite)
 $XDG_STATE_HOME/sal/web-token                             web console token (0600)
 ```
 
@@ -203,8 +203,15 @@ sal --tools read,grep,find,ls -p "audit this repo"   # read-only run
 
 A working directory owns exactly one conversation. Start sal there and it
 continues; there is nothing to list or switch between, and every message is
-written to disk as it happens, so a crash or a closed terminal loses at most the
-turn in flight.
+saved as it happens, so a crash or a closed terminal loses at most the turn in
+flight.
+
+Conversations are kept in one SQLite database,
+`$XDG_DATA_HOME/sal/sessions/sal.db`. The database enforces the one-conversation-
+per-directory rule and makes each write atomic, so two sal processes in the same
+directory cannot end up with two conversations and an interrupted write cannot
+leave a half-written one. The schema is versioned: sal migrates an older
+database forward on start and refuses a newer one rather than damaging it.
 
 ```
 $ sal --list-sessions
@@ -216,13 +223,14 @@ $ sal --list-sessions
 use --dir <path> to work on one of them
 ```
 
-`--new` moves the stored conversation aside (never deletes it) and starts fresh;
-`--dir <path>` works on another directory's conversation; `--session <file>`
-opens a specific file. In a console, `/session` describes the current one and
-`/new [path]` starts over or continues elsewhere.
+`--new` archives the stored conversation (never deletes it) and starts fresh;
+`--dir <path>` works on another directory's conversation; `--session <id>`
+opens a specific stored conversation. In a console, `/session` describes the
+current one and `/new [path]` starts over or continues elsewhere.
 
-A conversation written by an older release is adopted: the newest of that
-directory's files becomes the conversation, and the rest stay on disk.
+Conversations an older release kept as JSONL files are imported once, on first
+start: the newest file of each directory becomes its conversation, and the files
+themselves are left untouched.
 
 ### Web console
 
@@ -273,7 +281,7 @@ The console is built to be reloaded while the agent keeps working:
   stderr when it resumed one.
 
 Restoring the transcript reads the session's messages; tool output comes back
-whole, while per-call durations are not part of the session file and are lost
+whole, while per-call durations are not stored and are lost
 across a restart.
 
 ### Transient provider failures
@@ -336,7 +344,7 @@ automatically at 80% (or `--compact-at`), and on demand with:
 The most recent 3 turns are kept verbatim, the system prompt and tool
 definitions are never touched, and the summary is labelled as a record rather
 than instructions. The visible transcript is not rewritten: it stays your
-record of what happened. The session file keeps every message, and resuming
+record of what happened. The stored conversation keeps every message, and resuming
 continues from the summary. `/context summary` prints what the model was told
 about the compacted part. `--no-auto-compact` leaves compaction to you; the
 footer still warns as the window fills, and a request that is too large then
