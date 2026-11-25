@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-25
+
 ### Removed
 
 - **The terminal UI.** The browser console (`--web`) is the only interactive
@@ -209,7 +211,9 @@ First release.
   `--append-system-prompt`, and per-conversation session headers for gateways
   that route agent traffic.
 
-[Unreleased]: https://github.com/bothought/sal/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/bothought/sal/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bothought/sal/releases/tag/v0.2.0
+[0.1.5]: https://github.com/bothought/sal/releases/tag/v0.1.5
 [0.1.4]: https://github.com/bothought/sal/releases/tag/v0.1.4
 [0.1.3]: https://github.com/bothought/sal/releases/tag/v0.1.3
 [0.1.2]: https://github.com/bothought/sal/releases/tag/v0.1.2
