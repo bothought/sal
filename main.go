@@ -143,6 +143,7 @@ type options struct {
 	web           bool
 	webAddr       string
 	webToken      string
+	noWebAuth     bool
 	prompts       []string
 	files         []string
 }
@@ -354,7 +355,7 @@ func runWithArgs(args []string) error {
 	case opts.printMode:
 		return runPrint(ctx, ag, prompt, os.Stdout, os.Stderr)
 	case opts.web:
-		return runWeb(ctx, ag, store, cwd, prompt, sess, opts.webAddr, opts.webToken)
+		return runWeb(ctx, ag, store, cwd, prompt, sess, opts.webAddr, opts.webToken, opts.noWebAuth)
 	case jsonMode:
 		return runJSON(ctx, ag, prompt)
 	default:
@@ -433,6 +434,7 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 	fs.BoolVar(&o.web, "web", false, "serve the console in a browser instead of the terminal")
 	fs.StringVar(&o.webAddr, "web-addr", "127.0.0.1:8080", "address for --web to listen on")
 	fs.StringVar(&o.webToken, "web-token", "", "optional access token for --web (default $SAL_WEB_TOKEN)")
+	fs.BoolVar(&o.noWebAuth, "no-web-auth", false, "disable web authentication and allow any listen address (for a trusted forward-auth proxy)")
 
 	if err := fs.Parse(args); err != nil {
 		return o, nil, err
@@ -1057,7 +1059,7 @@ func restoreCompaction(ag *agent.Agent, sess *session.Session) {
 
 // runWeb serves the console in a browser: the agent, tools, session and event
 // stream, rendered by the embedded page.
-func runWeb(ctx context.Context, ag *agent.Agent, store *session.Store, cwd, prompt string, sess *session.Session, addr, token string) error {
+func runWeb(ctx context.Context, ag *agent.Agent, store *session.Store, cwd, prompt string, sess *session.Session, addr, token string, noAuth bool) error {
 	cbs := sessionHooks(ag, store, cwd, sess)
 	srv := web.New(web.Options{
 		Agent:         ag,
@@ -1070,6 +1072,7 @@ func runWeb(ctx context.Context, ag *agent.Agent, store *session.Store, cwd, pro
 		NewSession:    cbs.New,
 		OpenSession:   cbs.Open,
 		Token:         token,
+		NoAuth:        noAuth,
 	})
 	return srv.ListenAndServe(ctx, addr)
 }
@@ -1143,6 +1146,8 @@ options:
   --web-addr <addr>    address for --web to listen on (default 127.0.0.1:8080)
   --web-token <token>  optional access token for --web (default $SAL_WEB_TOKEN);
                        without one, loopback requests need no token
+  --no-web-auth        disable web authentication and allow any listen address
+                       (only behind a trusted forward-auth proxy)
   -h, --help           show this help
   -v, --version        show the version
 

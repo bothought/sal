@@ -83,6 +83,10 @@ type Options struct {
 	// it. When empty, the console accepts loopback clients only and refuses
 	// cross-origin browser requests; a non-loopback listen address is refused.
 	Token string
+	// NoAuth disables web authentication and the loopback/host/origin checks
+	// entirely. It is for deployments behind a trusted forward-auth proxy and
+	// allows any listen address. Token is ignored when set.
+	NoAuth bool
 	// SessionInfo describes the current session (/session).
 	SessionInfo func() string
 	// SessionID reports the id of the current session, if any. It is put in the
@@ -168,6 +172,7 @@ type Server struct {
 	opts    Options
 	baseCtx context.Context
 	token   string
+	noAuth  bool
 
 	mu       sync.Mutex
 	subs     map[chan []byte]struct{}
@@ -202,10 +207,14 @@ func New(opts Options) *Server {
 		opts.Version = "dev"
 	}
 	token := strings.TrimSpace(opts.Token)
+	if opts.NoAuth {
+		token = ""
+	}
 	s := &Server{
 		opts:    opts,
 		baseCtx: opts.Context,
 		token:   token,
+		noAuth:  opts.NoAuth,
 		subs:    map[chan []byte]struct{}{},
 		cur:     -1,
 		curTool: -1,
@@ -256,13 +265,22 @@ func (s *Server) URL(addr string) string {
 	return u
 }
 
+// validateListen rejects a network bind that has neither a token nor an
+// explicit authentication bypass.
+func (s *Server) validateListen(addr string) error {
+	if s.noAuth || s.token != "" || loopbackListenAddress(addr) {
+		return nil
+	}
+	return fmt.Errorf("refusing to serve the web console on %s without an access token; set --web-token, --no-web-auth, or bind to a loopback address", addr)
+}
+
 // ListenAndServe serves the console until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	if strings.TrimSpace(addr) == "" {
 		addr = defaultAddr
 	}
-	if s.token == "" && !loopbackListenAddress(addr) {
-		return fmt.Errorf("refusing to serve the web console on %s without an access token; set --web-token or bind to a loopback address", addr)
+	if err := s.validateListen(addr); err != nil {
+		return err
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -307,9 +325,14 @@ func (s *Server) Handler() http.Handler {
 
 // auth protects every route. A configured token is required everywhere. With no
 // token, the console accepts loopback clients only, rejects a non-loopback Host
-// (DNS rebinding) and rejects cross-origin browser requests (CSRF).
+// (DNS rebinding) and rejects cross-origin browser requests (CSRF). NoAuth
+// bypasses all of that for a trusted forward-auth deployment.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.noAuth {
+			next(w, r)
+			return
+		}
 		if s.token != "" {
 			tok := r.Header.Get("X-Sal-Token")
 			if tok == "" {
