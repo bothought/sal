@@ -2,12 +2,11 @@
 
 [![CI](https://github.com/bothought/sal/actions/workflows/ci.yml/badge.svg)](https://github.com/bothought/sal/actions/workflows/ci.yml)
 
-A minimal coding agent written in Go, with a
-[bubbletea](https://github.com/charmbracelet/bubbletea) terminal UI.
+A minimal coding agent written in Go, with a browser console.
 
-sal is an agent loop over an LLM with a small set of built-in file/shell tools,
-a terminal interface, and JSONL sessions. It deliberately leaves out extension,
-skill, package, and provider-matrix machinery.
+sal is an agent loop over an LLM with a small set of built-in file/shell tools, a
+web console, and SQLite sessions. It deliberately leaves out extension, skill,
+package, and provider-matrix machinery.
 
 ## What it does
 
@@ -17,16 +16,13 @@ skill, package, and provider-matrix machinery.
   without tool calls (bounded by `--max-turns`, default 32).
 - **Seven built-in tools:** `read`, `bash`, `edit`, `write`, `grep`, `find`,
   `ls`.
-- **Terminal UI.** Startup header, scrollable transcript showing each tool call
-  and its output, multi-line editor, and a footer with directory, model, session
-  status, context-window use, and token usage.
-- **Four interfaces:** interactive TUI, `--web` browser console, `--print`
-  one-shot, and `--mode json` for a machine-readable event stream.
-- **One conversation per directory**, stored in a local SQLite database and continued
-  automatically. Every message is written as it happens.
-- **Context window.** The footer shows `ctx used/limit` for the next request,
-  and older messages are summarized automatically when the window fills (or on
-  `/compact`), so a long session keeps working.
+- **Three interfaces:** the browser console (`--web`), one-shot print mode
+  (`--print`), and `--mode json` for a machine-readable event stream.
+- **One conversation per directory**, stored in a local SQLite database and
+  continued automatically. Every message is written as it happens.
+- **Context window.** The console footer shows `ctx used/limit` for the next
+  request, and older messages are summarized automatically when the window fills
+  (or on `/compact`), so a long session keeps working.
 - **OpenAI-compatible provider** — OpenAI, OpenRouter, Groq, Ollama, llama.cpp,
   vLLM, LM Studio, and anything else speaking `/chat/completions`.
 
@@ -39,8 +35,8 @@ git clone https://github.com/bothought/sal && cd sal && go build -o sal .
 
 Building needs Go 1.27.1 or newer (see `go.mod`); `go build` produces a single
 static binary with no runtime dependencies — the SQLite engine is pure Go and
-compiled in, so there is no C toolchain and no shared library to install.
-Release binaries for Linux, macOS and Windows (amd64 and arm64) are attached to each
+compiled in, so there is no C toolchain and no shared library to install. Release
+binaries for Linux, macOS and Windows (amd64 and arm64) are attached to each
 [release](https://github.com/bothought/sal/releases).
 
 ### Upgrading
@@ -53,15 +49,15 @@ sal upgrade           # download, verify and install it
 ```
 
 `sal upgrade` takes the latest non-prerelease release, chooses the archive for
-this machine (Termux uses the `linux/arm64` one), checks it against the
-release's SHA-256 list, runs it once to confirm it reports the release version,
-and only then puts it in place of the running binary. A failure at any step
-leaves the installed binary untouched. Packages, sessions and configuration are
-not touched; a symbolic link on `PATH` is preserved.
+this machine (Termux uses the `linux/arm64` one), checks it against the release's
+SHA-256 list, runs it once to confirm it reports the release version, and only
+then puts it in place of the running binary. A failure at any step leaves the
+installed binary untouched. Sessions and configuration are not touched; a
+symbolic link on `PATH` is preserved.
 
-The command needs no API key, no configuration file and no terminal, and it
-never downgrades or installs a prerelease. The first word `upgrade` is reserved,
-so a prompt that begins with it is written `sal -- upgrade ...`.
+The command needs no API key, no configuration file and no terminal, and it never
+downgrades or installs a prerelease. The first word `upgrade` is reserved, so a
+prompt that begins with it is written `sal -- upgrade ...`.
 
 A binary installed with `go install` is replaced too, but the module cache is
 not: keep using `go install github.com/bothought/sal@latest` for those.
@@ -81,7 +77,6 @@ paths:
   config dir    ~/.config/sal
   session dir   ~/.local/share/sal/sessions
   data dir      ~/.local/share/sal
-  state dir     ~/.local/state/sal
 
 settings:
   provider             openai
@@ -96,8 +91,8 @@ settings:
 
 TOML at `$XDG_CONFIG_HOME/sal/config.toml` (`XDG_CONFIG_HOME` defaults to
 `~/.config`). JSON is also accepted as `config.json` in the same directory, and
-TOML wins when both exist. `--config <path>` or `$SAL_CONFIG` selects a
-specific file instead.
+TOML wins when both exist. `--config <path>` or `$SAL_CONFIG` selects a specific
+file instead.
 
 ```toml
 # ~/.config/sal/config.toml
@@ -126,17 +121,16 @@ produces a permissions warning.
 
 ### Credentials without copying secrets
 
-`api_key_env` names the environment variable holding the key, so the secret
-stays in one place:
+`api_key_env` names the environment variable holding the key, so the secret stays
+in one place:
 
 ```toml
 api_key     = ""
 api_key_env = "GATEWAY_API_KEY"
 ```
 
-The named variable is checked before `SAL_API_KEY` / `OPENAI_API_KEY`; a
-literal `api_key` in the file is the last resort, and `--api-key` overrides
-everything.
+The named variable is checked before `SAL_API_KEY` / `OPENAI_API_KEY`; a literal
+`api_key` in the file is the last resort, and `--api-key` overrides everything.
 
 ### Gateway identity headers
 
@@ -144,14 +138,14 @@ Some gateways route coding-agent traffic and require clients to identify
 themselves and to send a stable per-conversation id. sal always sends
 `User-Agent: sal/<version>`, and sends a session id header when the endpoint is
 known to want one — currently `x-opencode-session` for `opencode.ai`. Set
-`session_header` to name a different header, or to `""` to keep the automatic
+`session_header` to name a different header, or leave `""` for the automatic
 choice. The id is the conversation's session id, so continuing a conversation
-keeps the same routing affinity; runs with no stored session get a fresh one.
+keeps the same routing affinity.
 
 ### Example: a third-party gateway
 
-`examples/config.gateway.toml` shows the shape of a service that speaks the
-OpenAI protocol but wants its own credential variable and session header:
+`examples/config.gateway.toml` shows a service that speaks the OpenAI protocol
+but wants its own credential variable and session header:
 
 ```toml
 provider       = "openai"                    # the protocol; the URL picks the service
@@ -170,8 +164,8 @@ SAL_BASE_URL     / OPENAI_BASE_URL      endpoint (default https://api.openai.com
 SAL_MODEL        / OPENAI_MODEL         model (default gpt-4o-mini)
 SAL_CONFIG                              config file path
 SAL_SESSION_DIR                         session storage root
-SAL_WEB_TOKEN                           access token for --web
-XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME
+SAL_WEB_TOKEN                           optional access token for --web
+XDG_CONFIG_HOME / XDG_DATA_HOME
 ```
 
 `SAL_*` wins over the `OPENAI_*` aliases. Relative values in the `XDG_*`
@@ -182,37 +176,36 @@ variables are ignored, as the XDG specification requires.
 ```
 $XDG_CONFIG_HOME/sal/config.toml        (or config.json)   configuration
 $XDG_DATA_HOME/sal/sessions/sal.db                       conversations (SQLite)
-$XDG_STATE_HOME/sal/web-token                             web console token (0600)
 ```
 
 ## Usage
 
 ```bash
-sal                                  # interactive
-sal "list the go files here"         # interactive with an initial prompt
-sal -p "summarize README.md"         # one-shot, prints the response
-cat main.go | sal -p "review this"   # pipe into a one-shot run
-sal -p @notes.md "extract the todos" # include a file
-sal --mode json "inspect this repo"  # JSONL event stream
-sal --web                            # browser console on 127.0.0.1:8080
-sal --dir ~/src/other                # work on another directory's conversation
-sal --new                            # start this directory over
+sal --web                             # browser console on 127.0.0.1:8080
+sal -p "summarize README.md"          # one-shot, prints the response
+cat main.go | sal -p "review this"    # pipe into a one-shot run
+sal -p @notes.md "extract the todos"  # include a file
+sal --mode json "inspect this repo"   # JSONL event stream
+sal --dir ~/src/other --web           # another directory's conversation
+sal --new --web                       # start this directory over
 sal --tools read,grep,find,ls -p "audit this repo"   # read-only run
 ```
+
+Print mode is the default when neither `--web` nor `--mode json` is selected.
+With no prompt and no piped input, it reports that no prompt was given.
 
 ### Sessions
 
 A working directory owns exactly one conversation. Start sal there and it
-continues; there is nothing to list or switch between, and every message is
-saved as it happens, so a crash or a closed terminal loses at most the turn in
-flight.
+continues; there is nothing to list or switch between, and every message is saved
+as it happens, so a crash or a closed terminal loses at most the turn in flight.
 
 Conversations are kept in one SQLite database,
 `$XDG_DATA_HOME/sal/sessions/sal.db`. The database enforces the one-conversation-
 per-directory rule and makes each write atomic, so two sal processes in the same
 directory cannot end up with two conversations and an interrupted write cannot
-leave a half-written one. The schema is versioned: sal migrates an older
-database forward on start and refuses a newer one rather than damaging it.
+leave a half-written one. The schema is versioned: sal migrates an older database
+forward on start and refuses a newer one rather than damaging it.
 
 ```
 $ sal --list-sessions
@@ -221,77 +214,72 @@ $ sal --list-sessions
   ~/src/project                           12 msgs · 2026-11-05 14:05 — the parser
   ~/src/other                              3 msgs · 2026-11-05 13:58
 
-use --dir <path> to work on one of them
+use --dir <path> to continue a directory's conversation
 ```
 
 `--new` archives the stored conversation (never deletes it) and starts fresh;
-`--dir <path>` works on another directory's conversation; `--session <id>`
-opens a specific stored conversation. In a console, `/session` describes the
-current one and `/new [path]` starts over or continues elsewhere.
+`--dir <path>` works on another directory's conversation; `--session <id>` opens a
+specific stored conversation. In the console, `/session` describes the current
+one and `/new [path]` starts over or continues elsewhere.
 
 Conversations an older release kept as JSONL files are imported once, on first
 start: the newest file of each directory becomes its conversation, and the files
-themselves are left untouched.
+are left untouched.
 
 ### Web console
 
-`--web` serves the same console in a browser instead of the terminal: the same
-agent, tools, sessions, and event stream, with a plain page (no ASCII art).
-`--web-addr` picks the listen address; it defaults to `127.0.0.1:8080` and
-stays on loopback unless you widen it.
+`--web` serves the console in a browser: the same agent, tools, sessions, and
+event stream, with a plain page (no ASCII art). `--web-addr` picks the listen
+address; it defaults to `127.0.0.1:8080` and stays on loopback unless you widen
+it.
 
 ```
 $ sal --web
-sal web console: http://127.0.0.1:8080/?token=b20e4552…&session=67838d59…
+sal web console: http://127.0.0.1:8080/?session=67838d59…
 ```
 
-The URL carries the access token and the session it was opened in. Every request
-must present the token, which is what keeps a page on another origin from
-reaching the API through your browser's loopback access, since the console can
-run shell commands. The page is served from the binary, so there is no build step
-and no extra files.
+The URL carries the session it was opened in. When `--web-token` or
+`$SAL_WEB_TOKEN` is set, the URL also carries the access token, and every request
+must present it. Without a token, the console accepts local clients on loopback;
+cross-origin browser requests and forged `Host` headers are refused, which keeps
+a page on another origin from driving the agent. Binding a non-loopback address
+requires a token.
 
-`xterm`-free transcript: user turns, streamed assistant text, each tool call
-with its output and duration, errors, and a footer with model, status,
-context-window use, token usage, session, and turns. The editor supports the
-same slash commands as the TUI (`/help /model /new /session /tools /context
-/compact /clear`); `enter` sends, `shift+enter` inserts a newline, `esc` aborts,
-and a prompt submitted while the agent is busy is queued. Server-sent events carry the stream; each reconnect resynchronises
-from a full snapshot, so a dropped connection never duplicates or loses blocks.
+The page is served from the binary, so there is no build step and no extra files.
+The transcript shows user turns, streamed assistant text, each tool call with its
+output and duration, errors, and a footer with model, status, context-window use,
+token usage, session, and turns. The editor supports the slash commands below;
+`enter` sends, `shift+enter` inserts a newline, `esc` aborts, and a prompt
+submitted while the agent is busy is queued. Server-sent events carry the stream;
+each reconnect resynchronises from a full snapshot, so a dropped connection never
+duplicates or loses blocks.
 
 #### Reloading, and surviving a restart
 
-The console is built to be reloaded while the agent keeps working:
-
-- **The token is persisted**, not regenerated per process. `--web` reuses the
-  token in `$XDG_STATE_HOME/sal/web-token` (mode `0600`), creating a random one
-  the first time, so a page that is already open keeps working after the process
-  is restarted — reload it and it reconnects to the new process. Override with
-  `--web-token` or `$SAL_WEB_TOKEN` (both are for development; a fixed token is
-  worth no more than its exposure).
 - **The session is in the URL.** A reload rebuilds the transcript from the
   conversation the server is serving, marked with a `restored` note; `/new`
   rewrites the URL so the address bar always names the session the tab is
   showing. A directory has one conversation, so a URL cannot select a different
   one: a tab that outlived a restart keeps serving the directory's conversation,
-  and a `session` that no longer matches only produces a note on stderr rather
-  than silently swapping the conversation.
+  and a `session` that no longer matches only produces a note on stderr.
 - **A restarted process continues the directory's conversation**, so a
   rebuild-and-reload loop needs no extra flag and an open tab finds the same
   conversation either way. Starting sal prints `sal: continuing <path>` to
   stderr when it resumed one.
+- **The URL keeps working across a restart** at the same address. With an
+  explicit token, the URL must still carry that token; without one, the address
+  alone is enough.
 
 Restoring the transcript reads the session's messages; tool output comes back
-whole, while per-call durations are not stored and are lost
-across a restart.
+whole, while per-call durations are not stored and are lost across a restart.
 
 ### Transient provider failures
 
 Gateways drop connections: a reset (`read: connection reset by peer`), a timeout,
 or a `429`/`5xx` response. sal treats those as transient and retries the request
 with exponential backoff (0.5s, 1s, 2s, 4s, capped at 10s), four times by
-default. A `Retry-After` header from the server wins over the backoff. The TUI,
-the web console, and print mode report each retry as it happens:
+default. A `Retry-After` header from the server wins over the backoff. The
+console and print mode report each retry as it happens:
 
 ```
 retrying  request to https://… failed: … connection reset by peer
@@ -306,21 +294,10 @@ bounded (60s), so a slow but healthy stream is never cut off. The budget is
 `--max-retries` (or `max_retries` in the config file); a negative value disables
 retrying, and `0` means the default.
 
-### Editor and keys
-
-| Key | Action |
-|---|---|
-| `enter` | submit (queues the message if the agent is working) |
-| `alt+enter` | newline |
-| `esc` | abort the current run |
-| `pgup`/`pgdn`, `alt+up`/`alt+down` | scroll the transcript |
-| `ctrl+l` | clear the transcript |
-| `ctrl+c` | quit |
-
 ### Context window and compaction
 
-The footer carries a context segment between the status and the cumulative token
-counters:
+The console footer carries a context segment between the status and the
+cumulative token counters:
 
 ```
 ~/work/sal   gpt-4o-mini · ready · ctx 12.4k/128k 10% · ↑120k ↓8.2k · 3 turns
@@ -342,10 +319,10 @@ automatically at 80% (or `--compact-at`), and on demand with:
 /compact [what to keep]
 ```
 
-The most recent 3 turns are kept verbatim, the system prompt and tool
-definitions are never touched, and the summary is labelled as a record rather
-than instructions. The visible transcript is not rewritten: it stays your
-record of what happened. The stored conversation keeps every message, and resuming
+The most recent 3 turns are kept verbatim, the system prompt and tool definitions
+are never touched, and the summary is labelled as a record rather than
+instructions. The visible transcript is not rewritten: it stays your record of
+what happened. The stored conversation keeps every message, and resuming
 continues from the summary. `/context summary` prints what the model was told
 about the compacted part. `--no-auto-compact` leaves compaction to you; the
 footer still warns as the window fills, and a request that is too large then
@@ -406,13 +383,12 @@ is untrusted input: prompt injection from files sal reads can request arbitrary
 commands. Use `--tools` to drop `bash`/`write`/`edit` for read-only work, and
 `--web-addr` to keep the console on loopback.
 
-The web console binds to `127.0.0.1` by default and authenticates every request
-with the token in its URL; widening `--web-addr` exposes an interface that can
-run shell commands, so put it behind your own access control. The token is
-reused from `$XDG_STATE_HOME/sal/web-token` so a restarted process keeps serving
-pages that are already open — that file is as sensitive as the console itself
-(it is created mode `0600`), and `--web-token`/`$SAL_WEB_TOKEN` trade that
-convenience for a fixed, guessable value.
+The console binds to `127.0.0.1` by default. Without an access token, loopback
+clients are accepted but cross-origin browser requests and non-loopback hosts are
+rejected; binding a non-loopback address requires `--web-token` or
+`$SAL_WEB_TOKEN`. Without a token, any local process or user can reach the
+console — treat its API as you would a local shell. A token is strongly
+recommended whenever the console is reachable by anything you do not trust.
 
 Report vulnerabilities privately rather than in a public issue — see
 [SECURITY.md](SECURITY.md).
@@ -428,13 +404,12 @@ gofmt -l .             # must print nothing
 
 The suite runs the real agent loop against a scripted SSE server over loopback
 and executes the real tools against temp directories, so the tool-call round
-trip, error handling, session persistence, and the TUI's event handling are
-covered end to end.
+trip, error handling, session persistence, and the web console's event handling
+are covered end to end.
 
 Rebuilding while the web console runs is the normal loop: `go build -o sal .`
-replaces the binary, and restarting the process leaves an open browser tab
-usable — reload it and the token, the session and the transcript all come back
-(see *Reloading, and surviving a restart* above).
+replaces the binary, and restarting the process leaves an open browser tab usable
+— reload it and the session and transcript come back.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules, and
 [CHANGELOG.md](CHANGELOG.md) for what changed in each release. Security issues
@@ -447,20 +422,19 @@ Deliberate, given "basic functions only":
 - Only the OpenAI-compatible provider is implemented; there is no native
   Anthropic or Google client and no `/login` OAuth flow. Other vendors are
   reachable through a compatible gateway.
-- No extensions, skills, prompt templates, packages, themes, sub-agents, MCP,
-  plan mode, or background bash.
+- No terminal UI, extensions, skills, prompt templates, packages, themes,
+  sub-agents, MCP, plan mode, or background bash.
 - No session tree navigation (`/tree`, `/fork`, `/clone`) or HTML export;
-  sessions are linear and resumable only. Compaction is not an exception: it
-  changes what the model is sent, not the stored session, which keeps every
-  message.
+  sessions are linear and resumable only. Compaction changes what the model is
+  sent, not the stored session, which keeps every message.
 - No prompt caching or cost accounting; the footer reports token counts only.
 - Context tracking is approximate: no bundled tokenizer, and a small built-in
   table for model windows rather than a vendor matrix.
 - `grep` uses Go's `regexp` rather than ripgrep, and neither search tool reads
   `.gitignore`.
-- `sal upgrade` verifies the release's checksums but not a signature, and it
-  only installs the latest release: no downgrade, no pinned or prerelease
-  version. It replaces the binary and nothing else.
+- `sal upgrade` verifies the release's checksums but not a signature, and it only
+  installs the latest release: no downgrade, no pinned or prerelease version. It
+  replaces the binary and nothing else.
 
 ## License
 

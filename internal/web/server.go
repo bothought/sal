@@ -1,22 +1,19 @@
 // Package web serves sal's console as a local web page: the same agent, tools,
-// session and event stream the terminal UI draws, rendered in a browser instead
-// of a TTY. It is a thin adapter over the agent loop -- every event the TUI would
-// render is forwarded to the page over server-sent events.
+// session and event stream, rendered in a browser. It is a thin adapter over the
+// agent loop -- every event the loop emits is forwarded to the page over
+// server-sent events.
 //
 // The page is intentionally plain HTML/CSS/JS with no build step. The server
-// binds to a loopback address by default and every request must carry an access
-// token, so other pages open in the same browser cannot drive the agent (the
-// token defeats cross-site request forgery). The token is reused from a file
-// when one is configured, so a restarted process keeps serving the page that is
-// already open.
+// binds to a loopback address by default. Without an access token it accepts
+// loopback clients only and refuses cross-origin browser requests, so another
+// page cannot drive the agent through a browser's loopback access. A configured
+// token protects every route, and is required to bind a non-loopback address.
 package web
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +22,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +32,7 @@ import (
 //go:embed index.html
 var assets embed.FS
 
-// Constants for transcript block kinds, mirroring the terminal UI.
+// Constants for transcript block kinds, shared with the page.
 const (
 	kindUser      = "user"
 	kindAssistant = "assistant"
@@ -83,12 +79,10 @@ type Options struct {
 	Context context.Context
 	// InitialPrompt, when set, starts a run as soon as the server is created.
 	InitialPrompt string
-	// Token is an explicit access token. When it is empty and TokenFile is set,
-	// the token stored there is reused, so a restarted process keeps accepting
-	// the page that is already open; a random token is generated and persisted
-	// when the file does not exist yet.
-	Token     string
-	TokenFile string
+	// Token is an optional access token. When set, every request must present
+	// it. When empty, the console accepts loopback clients only and refuses
+	// cross-origin browser requests; a non-loopback listen address is refused.
+	Token string
 	// SessionInfo describes the current session (/session).
 	SessionInfo func() string
 	// SessionID reports the id of the current session, if any. It is put in the
@@ -197,9 +191,9 @@ type Server struct {
 	ctx agent.ContextInfo
 }
 
-// New builds the console, resolving its access token, restoring any stored
-// conversation into the transcript, and starting the initial prompt if one was
-// supplied.
+// New builds the console, restoring any stored conversation into the transcript
+// and starting the initial prompt if one was supplied. The token is optional;
+// when empty the console uses loopback-only access.
 func New(opts Options) *Server {
 	if opts.Context == nil {
 		opts.Context = context.Background()
@@ -208,17 +202,6 @@ func New(opts Options) *Server {
 		opts.Version = "dev"
 	}
 	token := strings.TrimSpace(opts.Token)
-	if token == "" && opts.TokenFile != "" {
-		t, err := loadOrCreateToken(opts.TokenFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "sal web: cannot use the token file %s: %v\n", opts.TokenFile, err)
-		} else {
-			token = t
-		}
-	}
-	if token == "" {
-		token = newToken()
-	}
 	s := &Server{
 		opts:    opts,
 		baseCtx: opts.Context,
@@ -235,40 +218,9 @@ func New(opts Options) *Server {
 	return s
 }
 
-// Token is the access token required by every request.
+// Token reports the configured access token, or "" when the console relies on
+// loopback-only access.
 func (s *Server) Token() string { return s.token }
-
-// loadOrCreateToken returns the token persisted at path, writing a fresh one
-// with owner-only permissions when the file is missing or empty.
-func loadOrCreateToken(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		if tok := strings.TrimSpace(string(data)); tok != "" {
-			return tok, nil
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return "", err
-	}
-	tok := newToken()
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", err
-		}
-	}
-	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
-		return "", err
-	}
-	return tok, nil
-}
-
-func newToken() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
-}
 
 // SessionID is the id of the session the console is serving, or "" when
 // sessions are disabled.
@@ -280,7 +232,8 @@ func (s *Server) SessionID() string {
 }
 
 // URL renders the address the page should be opened at, rewriting wildcard
-// hosts, and including the access token and the current session.
+// hosts and including the token when one is configured and the session id when
+// there is one.
 func (s *Server) URL(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
 	if err == nil {
@@ -289,9 +242,16 @@ func (s *Server) URL(addr string) string {
 		}
 		addr = net.JoinHostPort(host, port)
 	}
-	u := fmt.Sprintf("http://%s/?token=%s", addr, s.token)
+	u := fmt.Sprintf("http://%s/", addr)
+	var query []string
+	if s.token != "" {
+		query = append(query, "token="+url.QueryEscape(s.token))
+	}
 	if id := s.SessionID(); id != "" {
-		u += "&session=" + url.QueryEscape(id)
+		query = append(query, "session="+url.QueryEscape(id))
+	}
+	if len(query) > 0 {
+		u += "?" + strings.Join(query, "&")
 	}
 	return u
 }
@@ -300,6 +260,9 @@ func (s *Server) URL(addr string) string {
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	if strings.TrimSpace(addr) == "" {
 		addr = defaultAddr
+	}
+	if s.token == "" && !loopbackListenAddress(addr) {
+		return fmt.Errorf("refusing to serve the web console on %s without an access token; set --web-token or bind to a loopback address", addr)
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -342,20 +305,89 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// auth requires the startup token, so a page on another origin cannot reach the
-// API even though it can reach loopback.
+// auth protects every route. A configured token is required everywhere. With no
+// token, the console accepts loopback clients only, rejects a non-loopback Host
+// (DNS rebinding) and rejects cross-origin browser requests (CSRF).
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tok := r.Header.Get("X-Sal-Token")
-		if tok == "" {
-			tok = r.URL.Query().Get("token")
+		if s.token != "" {
+			tok := r.Header.Get("X-Sal-Token")
+			if tok == "" {
+				tok = r.URL.Query().Get("token")
+			}
+			if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+				http.Error(w, "invalid or missing token", http.StatusForbidden)
+				return
+			}
+			next(w, r)
+			return
 		}
-		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
-			http.Error(w, "invalid or missing token", http.StatusForbidden)
+		if !loopbackRequest(r) {
+			http.Error(w, "this console accepts loopback requests without a token", http.StatusForbidden)
 			return
 		}
 		next(w, r)
 	}
+}
+
+// loopbackRequest reports whether a tokenless request may be served: it must
+// come from a loopback address, name a loopback host, and not be a cross-origin
+// browser request.
+func loopbackRequest(r *http.Request) bool {
+	if !loopbackAddress(r.RemoteAddr) || !loopbackHost(r.Host) {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme != "http" || !strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+	}
+	switch strings.ToLower(r.Header.Get("Sec-Fetch-Site")) {
+	case "", "none", "same-origin":
+		return true
+	default:
+		return false
+	}
+}
+
+// loopbackAddress reports whether a host:port or bare host is loopback.
+func loopbackAddress(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// loopbackHost reports whether a Host header names a loopback host.
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// loopbackListenAddress reports whether a listen address is loopback-only.
+func loopbackListenAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -615,7 +647,7 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCompact compacts the conversation now, or queues the request when a
-// turn is in flight, exactly as the terminal UI does.
+// turn is in flight.
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "use POST")
@@ -1093,7 +1125,7 @@ func (s *Server) ClearTranscript() {
 }
 
 // NewSession clears the conversation and, when sessions are enabled, starts a
-// fresh session file.
+// fresh conversation.
 func (s *Server) NewSession() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

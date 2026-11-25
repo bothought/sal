@@ -1,7 +1,6 @@
-// Command sal is a minimal coding agent written in Go with bubbletea. It runs
-// an agent loop over an OpenAI-compatible provider with the
-// read/bash/edit/write/grep/find/ls tools, a terminal UI, a SQLite session
-// store, and print/JSON modes.
+// Command sal is a minimal coding agent written in Go. It runs an agent loop
+// over an OpenAI-compatible provider with the read/bash/edit/write/grep/find/ls
+// tools, a browser console, a SQLite session store, and print/JSON modes.
 package main
 
 import (
@@ -22,7 +21,6 @@ import (
 	"syscall"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
 	"github.com/bothought/sal/internal/agent"
@@ -30,7 +28,6 @@ import (
 	"github.com/bothought/sal/internal/provider"
 	"github.com/bothought/sal/internal/session"
 	"github.com/bothought/sal/internal/tools"
-	"github.com/bothought/sal/internal/tui"
 	"github.com/bothought/sal/internal/upgrade"
 	"github.com/bothought/sal/internal/web"
 )
@@ -349,22 +346,17 @@ func runWithArgs(args []string) error {
 	}
 
 	jsonMode := strings.EqualFold(opts.mode, "json")
-	interactive := !opts.printMode && !jsonMode &&
-		isatty.IsTerminal(os.Stdout.Fd()) && isatty.IsTerminal(os.Stdin.Fd())
-	if opts.mode != "" && strings.EqualFold(opts.mode, "text") && isatty.IsTerminal(os.Stdout.Fd()) {
-		interactive = !opts.printMode
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	switch {
+	case opts.printMode:
+		return runPrint(ctx, ag, prompt, os.Stdout, os.Stderr)
 	case opts.web:
 		return runWeb(ctx, ag, store, cwd, prompt, sess, opts.webAddr, opts.webToken)
 	case jsonMode:
 		return runJSON(ctx, ag, prompt)
-	case interactive:
-		return runInteractive(ag, store, cwd, prompt, sess)
 	default:
 		return runPrint(ctx, ag, prompt, os.Stdout, os.Stderr)
 	}
@@ -408,7 +400,7 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 
 	fs.BoolVar(&o.printMode, "p", false, "run the prompt, print the response, exit")
 	fs.BoolVar(&o.printMode, "print", false, "run the prompt, print the response, exit")
-	fs.StringVar(&o.mode, "mode", "", "output mode: text or json")
+	fs.StringVar(&o.mode, "mode", "", "output mode: json (default: print)")
 	fs.BoolVar(&o.newSession, "new", false, "move this directory's stored conversation aside and start fresh")
 	fs.StringVar(&o.dir, "dir", "", "work on this directory's conversation instead of the current one")
 	fs.BoolVar(&o.listSessions, "list-sessions", false, "list the conversations stored on this machine and exit")
@@ -440,7 +432,7 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 	fs.BoolVar(&o.showVersion, "version", false, "print version and exit")
 	fs.BoolVar(&o.web, "web", false, "serve the console in a browser instead of the terminal")
 	fs.StringVar(&o.webAddr, "web-addr", "127.0.0.1:8080", "address for --web to listen on")
-	fs.StringVar(&o.webToken, "web-token", "", "access token for --web (default $SAL_WEB_TOKEN, else a token persisted in the state directory)")
+	fs.StringVar(&o.webToken, "web-token", "", "optional access token for --web (default $SAL_WEB_TOKEN)")
 
 	if err := fs.Parse(args); err != nil {
 		return o, nil, err
@@ -461,8 +453,8 @@ func parseArgs(args []string) (options, map[string]bool, error) {
 		}
 		o.prompts = append(o.prompts, a)
 	}
-	if o.mode != "" && !strings.EqualFold(o.mode, "text") && !strings.EqualFold(o.mode, "json") {
-		return o, set, fmt.Errorf("unknown mode %q (want text or json)", o.mode)
+	if o.mode != "" && !strings.EqualFold(o.mode, "json") {
+		return o, set, fmt.Errorf("unknown mode %q (want json)", o.mode)
 	}
 	return o, set, nil
 }
@@ -620,8 +612,7 @@ func resolveOptions(o options, set map[string]bool, cfg config.Loaded) (options,
 	o.noSession = pickBool("no_session", o.noSession, []string{"no-session"}, cfg.File.NoSession)
 	o.noContext = pickBool("no_context_files", o.noContext, []string{"nc", "no-context-files"}, cfg.File.NoContextFiles)
 	// The web token is deliberately not part of the printed settings: it is a
-	// local secret, and the default (reuse or create the state-dir token) is what
-	// keeps an open browser tab working across restarts.
+	// secret, and it is optional. An empty value means loopback-only access.
 	if o.webToken == "" {
 		o.webToken = strings.TrimSpace(os.Getenv("SAL_WEB_TOKEN"))
 	}
@@ -691,7 +682,6 @@ func printConfig(o options, sources []settingSource, cfg config.Loaded, paths co
 	fmt.Printf("  config dir    %s\n", paths.ConfigDir)
 	fmt.Printf("  session dir   %s\n", session.RootWith(o.sessionDir))
 	fmt.Printf("  data dir      %s\n", paths.DataDir)
-	fmt.Printf("  state dir     %s\n", paths.StateDir)
 	fmt.Printf("\nsettings:\n")
 	for _, s := range sources {
 		fmt.Printf("  %-20s %s\n", s.Key, maskedValue(s.Key, s.Value))
@@ -900,7 +890,7 @@ func runJSON(ctx context.Context, ag *agent.Agent, prompt string) error {
 	})
 }
 
-// sessionSummary describes an active session for the TUI/web footers.
+// sessionSummary describes an active session for the web console.
 func sessionSummary(sess *session.Session) string {
 	body := fmt.Sprintf("id %s · %s · %d messages", shortSessionID(sess.ID), displayDir(sess.Cwd), len(sess.Messages))
 	if sess.Archived {
@@ -933,9 +923,7 @@ func shortSessionID(id string) string {
 	return id
 }
 
-// sessionCallbacks are the session controls the TUI and the web console share.
-// Each one reads the session variable they close over, so replacing the session
-// keeps all of them in step.
+// sessionCallbacks are the session controls the web console uses.
 type sessionCallbacks struct {
 	// Info describes the session for the footer.
 	Info func() string
@@ -949,10 +937,9 @@ type sessionCallbacks struct {
 	Open func(dir string) (string, error)
 }
 
-// sessionHooks returns the callbacks shared by the interactive terminal UI and
-// the web console. When either starts over or opens another directory's
-// conversation, the agent and the (possibly replaced) session are rewired so
-// persistence keeps working.
+// sessionHooks returns the callbacks the web console uses, and rewires the
+// agent and the (possibly replaced) session when the console starts over or
+// opens another directory's conversation.
 func sessionHooks(ag *agent.Agent, st *session.Store, cwd string, sess *session.Session) sessionCallbacks {
 	if sess == nil || st == nil {
 		return sessionCallbacks{Info: func() string { return "" }, ID: func() string { return "" }}
@@ -1068,25 +1055,8 @@ func restoreCompaction(ag *agent.Agent, sess *session.Session) {
 	})
 }
 
-func runInteractive(ag *agent.Agent, store *session.Store, cwd, prompt string, sess *session.Session) error {
-	cbs := sessionHooks(ag, store, cwd, sess)
-	opts := tui.Options{
-		Agent:         ag,
-		Cwd:           cwd,
-		Version:       version,
-		InitialPrompt: prompt,
-		SessionInfo:   cbs.Info,
-		SessionID:     cbs.ID,
-		NewSession:    cbs.New,
-		OpenSession:   cbs.Open,
-	}
-	p := tea.NewProgram(tui.New(opts))
-	_, err := p.Run()
-	return err
-}
-
-// runWeb serves the same console in a browser. The agent, tools, session and
-// event stream are shared with the terminal UI; only the rendering differs.
+// runWeb serves the console in a browser: the agent, tools, session and event
+// stream, rendered by the embedded page.
 func runWeb(ctx context.Context, ag *agent.Agent, store *session.Store, cwd, prompt string, sess *session.Session, addr, token string) error {
 	cbs := sessionHooks(ag, store, cwd, sess)
 	srv := web.New(web.Options{
@@ -1100,9 +1070,6 @@ func runWeb(ctx context.Context, ag *agent.Agent, store *session.Store, cwd, pro
 		NewSession:    cbs.New,
 		OpenSession:   cbs.Open,
 		Token:         token,
-		// Persisting the token keeps the page that is already open working
-		// across a restart, which is what makes refreshing enough.
-		TokenFile: filepath.Join(config.Resolve().StateDir, "web-token"),
 	})
 	return srv.ListenAndServe(ctx, addr)
 }
@@ -1128,7 +1095,7 @@ func truncate(s string, n int) string {
 }
 
 func usageText() string {
-	return `sal — a minimal coding agent in Go (bubbletea)
+	return `sal — a minimal coding agent in Go
 
 usage:
   sal [options] [--] [@files...] [messages...]
@@ -1141,8 +1108,7 @@ commands:
                        it as: sal -- upgrade ...)
 
 modes:
-  (default)            interactive terminal UI
-  -p, --print          run the prompt, print the response, exit
+  -p, --print          run the prompt, print the response, exit (default)
   --mode json          stream agent events as JSON lines
   --web                serve the console in a browser (see --web-addr)
 
@@ -1174,11 +1140,9 @@ options:
                        runs (default 80)
   --config <path>      configuration file (default $XDG_CONFIG_HOME/sal/config.toml)
   --show-config        print the resolved configuration and exit
-  --web                serve the console in a browser instead of the terminal
   --web-addr <addr>    address for --web to listen on (default 127.0.0.1:8080)
-  --web-token <token>  access token for --web (default $SAL_WEB_TOKEN, else a
-                       token persisted in $XDG_STATE_HOME/sal/web-token, so an
-                       open browser tab keeps working across a restart)
+  --web-token <token>  optional access token for --web (default $SAL_WEB_TOKEN);
+                       without one, loopback requests need no token
   -h, --help           show this help
   -v, --version        show the version
 
@@ -1202,9 +1166,9 @@ configuration file:
     session_dir = ""              # default $XDG_DATA_HOME/sal/sessions
     session_header = ""           # "" = auto (x-opencode-session on opencode.ai)
 
-  Context: the footer shows "ctx used/limit percent". Older messages are
-  summarized automatically when the window fills; /compact does it on demand
-  and /context explains the figure.
+  Context: the console footer shows "ctx used/limit percent". Older messages
+  are summarized automatically when the window fills; /compact does it on
+  demand and /context explains the figure.
 
   Precedence per setting: flag > environment > config file > default.
   Run 'sal --show-config' to see the resolved values and their sources.
@@ -1215,19 +1179,18 @@ environment:
   SAL_MODEL / OPENAI_MODEL          model (default gpt-4o-mini)
   SAL_CONFIG                        configuration file path
   SAL_SESSION_DIR                   session storage root
-  SAL_WEB_TOKEN                     access token for --web
-  XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME   base directories
+  SAL_WEB_TOKEN                     optional access token for --web
+  XDG_CONFIG_HOME / XDG_DATA_HOME   base directories
 
 examples:
-  sal                                   start the interactive UI
-  sal "list the go files in this repo"  interactive with an initial prompt
+  sal --web                             serve the console in a browser
   sal -p "summarize README.md"          one-shot
   cat main.go | sal -p "review this"    pipe into a one-shot run
   sal -p @notes.md "extract the todos"  include a file
+  sal --mode json "inspect this repo"   JSON event stream
   sal --tools read,grep,find,ls -p "audit this repo"   read-only run
-  sal --dir ~/src/other                 work on another directory's conversation
-  sal --new                             start this directory over
-  sal --web                             serve the console in a browser
+  sal --dir ~/src/other --web           another directory's conversation
+  sal --new --web                       start this directory over
   sal upgrade --check                   is there a newer release?
   sal upgrade                           install the latest release
 `

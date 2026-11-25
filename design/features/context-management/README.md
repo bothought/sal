@@ -1,175 +1,87 @@
 # Context management
 
-This item covers two related capabilities:
+This item covers the context-window indicator and compaction: how much room is
+left, what happens when it runs out, and how a long session keeps working. How it
+is built is `design/technical/context-compaction`.
 
-1. **A context indicator** — how much of the model's context window the current
-   conversation occupies, shown in the interface.
-2. **Compaction** — replacing older parts of the conversation with a summary so a
-   long session can continue inside the window, either automatically when the
-   window is nearly full or on an explicit command.
+## 1. Vocabulary
 
-Both belong to one feature because they answer one question — "how much room is
-left, and what happens when it runs out" — and because the indicator is what
-tells the user when compaction happened and what it saved. How the two are
-implemented (measurement, model-limit discovery, the stored format of a
-compaction) belongs to the technical item
-`design/technical/context-compaction`.
-
-## 1. Purpose
-
-A long conversation eventually exceeds what the model accepts. Today sal has no
-notion of that limit: the footer reports cumulative token totals, which say how
-much has been spent, not how full the window is, and the first sign of trouble is
-a provider error rejecting the request. The user cannot plan around a limit they
-cannot see, and cannot recover from one except by starting over.
-
-The feature gives the user:
-
-- an always-visible `used / limit` figure for the current conversation, distinct
-  from the cumulative spend counters;
-- a warning as the window fills;
-- automatic compaction before a request would be rejected, so a long session
-  keeps working;
-- a manual command to compact on demand, with optional guidance about what to
-  preserve;
-- a record of what compaction did, so the conversation's losses are visible
-  rather than silent.
-
-## 2. Vocabulary
-
-- **Context window** — the maximum number of tokens the model accepts in one
-  request, including the system prompt, the tool definitions, and every message.
-- **Context** — what the *next* request will send: system prompt + tool
-  definitions + the active conversation.
+- **Context window** — the maximum tokens the model accepts in one request,
+  including the system prompt, tool definitions, and every message.
+- **Context** — what the *next* request will send: the system prompt, the tool
+  definitions, and the active conversation.
 - **Used** — the current size of the context in tokens.
-- **Limit** — the context window of the active model.
+- **Limit** — the active model's context window.
 - **Compaction** — replacing the oldest part of the active conversation with a
-  summary, so that used drops while the thread of work is preserved.
-- **Active context** — the messages the model sees. It can be smaller than the
-  stored log; see §6.4.
-- **Turn** and **run** — as defined in `design/features/basic-functions` §2.1.
+  summary so `used` drops while the thread of work survives.
+- **Active context** — the messages the model sees; after a compaction it is
+  smaller than the stored log.
 
-## 3. The context indicator
+## 2. The context indicator
 
-### 3.1 What is displayed
+### 2.1 Display
 
-The indicator is a single figure: **used / limit**, with the percentage of the
-window it represents.
+The web console footer carries a single segment between the status and the
+cumulative token counters:
 
-- **Terminal UI.** The footer gains a context segment beside the model, status,
-  cumulative `↑`/`↓` counts, and turn count:
+```
+gpt-4o-mini · ready · ctx ~12.4k/128k 10% · ↑120k ↓8.2k · 3 turns
+```
 
-  ```
-  ~/work/sal        gpt-4o-mini · ready · ctx ~12.4k/128k 10% · ↑120k ↓8.2k · 3 turns
-  ```
+`used` is the size of the *next* request; `↑`/`↓` remain the cumulative spend. A
+`~` marks an estimated figure. Before the first response the whole figure is
+estimated. After a response the provider's reported input and output token counts
+make it exact until something is appended; anything added after that is
+estimated, so the figure becomes approximate again.
 
-  The cumulative `↑`/`↓` counters stay as they are; they answer a different
-  question (how much has been spent), and removing them would be a regression.
-- **Web console.** The footer's right-hand side gains the same `ctx used/limit
-  percent` segment, in the same order relative to the other segments.
-- **No measurement yet.** Before the first response of a conversation, the figure
-  is an estimate (§3.4) and is marked with `~`:
-  `ctx ~12.4k/128k 10%`.
+Print and JSON runs have no footer. JSON mode reports the same figures on its
+event stream; print mode stays quiet about them except when compaction happens.
+Compaction works in all three interfaces.
 
-The indicator is a persistent interface element, so it exists where there is a
-persistent interface: the terminal footer and the web footer. One-shot print and
-JSON runs have no footer; JSON mode reports the same figures on its event stream
-(§4.6), and print mode stays quiet about them except when compaction happens.
-Compaction itself is a property of the run, not of the interface, so it works in
-all four modes.
-
-The numbers are abbreviated the way the existing counters are (`1.2k`, `3.4M`).
-
-### 3.2 Severity
-
-The indicator changes appearance as the window fills, so it reads at a glance:
+### 2.2 Severity
 
 | Occupancy | State | Presentation |
 |---|---|---|
-| below 70% | normal | default footer colour |
+| below 70% | normal | default colour |
 | 70% to the auto-compaction threshold | warning | warning colour |
-| at or above the auto-compaction threshold | critical | error colour, and the status shows `compacting…` while compaction runs |
+| at or above the threshold | critical | error colour; `compacting…` while an automatic compaction runs |
 | above 100% | over | error colour; `over by N` |
 
-The thresholds use the configured auto-compaction threshold (§5) so that
-"critical" always means "compaction is about to happen or has just happened",
-rather than a second set of magic numbers. The bands are the same whether or not
-automatic compaction is enabled: with it off they still show how close the
-conversation is to the window, there is simply no `compacting…` status and no
-automatic compaction behind them.
+The bands use the configured auto-compaction threshold, so “critical” always
+means compaction is due or just happened. They apply whether automatic compaction
+is enabled or not.
 
-### 3.3 Where the limit comes from
+### 2.3 Where the limit comes from
 
-Resolution is per setting, highest priority first:
+1. `--context-window <tokens>` or `context_window` in the config file.
+2. The endpoint's model metadata, when it publishes a context limit.
+3. A small built-in table of common model families, matched by model-id prefix.
+4. A conservative default of 128k.
 
-1. **Explicit configuration** — `--context-window <tokens>` or `context_window`
-   in the config file. Always wins, and is never second-guessed.
-2. **The endpoint's model metadata** — when the OpenAI-compatible service
-   publishes a context limit for the selected model, sal uses it. This is
-   best-effort: many services publish nothing, and a service that cannot be
-   reached for metadata is not an error — resolution simply continues to (3).
-3. **A built-in table** for common model families, matched by model id prefix
-   (`gpt-4o`, `o1`, `o3`, `llama3`, …). The table is small and conservative: it
-   exists so the common cases work without configuration, not to become a vendor
-   matrix.
-4. **A default of 128k**, marked as assumed.
+The limit is always known. `/context` names the source; the footer shows only the
+figure. Resolution happens before the first request of a run; drawing the footer
+does not contact the endpoint. `/model` discards the resolved value and asks
+again, because the window belongs to the model.
 
-The limit is therefore always known, which keeps the indicator a single shape.
-Whenever the value comes from (3) or (4), `/context` says so explicitly (`from
-the built-in table`, `assumed`); the footer shows only the figure, since a
-caveat on every line would crowd it. A wrong limit only changes *when* compaction
-happens; it never corrupts a conversation.
+### 2.4 Measuring “used”
 
-Resolution is lazy and happens when the window is first needed, which is before
-the first request of a run. An interface drawing its footer is not a reason to
-ask the endpoint, so the footer may briefly show the table or the default while
-the configured value is still 0; the first run resolves the real one, and every
-figure after that uses it. `/model` discards the resolved value and asks again,
-because the window belongs to the model.
+The figure covers:
 
-The limit follows the model: `/model` re-resolves it immediately, and switching
-to a model with a smaller window re-evaluates the threshold (§4.4, §6.3). A
-resumed session whose recorded model differs from the current one uses the
-current model.
-
-### 3.4 How "used" is measured
-
-The displayed number is the size of the next request, and it is as exact as the
-provider allows:
-
-- **Measured.** After a response, the provider reports the exact input and output
-  token counts for that request. Those two cover the entire active context at
-  that moment, so `used` is their sum until something is appended.
-- **Estimated.** Anything appended after that response — tool results, a new
-  user message, and the state after a compaction — is estimated from its text,
-  and the whole figure is marked `~` until the next response replaces it with a
-  measured figure. A figure is only exact when no part of it is estimated: as
-  soon as one message is appended after a response, the footer and `/context`
-  say `~` again, even though the number itself is the measured base plus an
-  estimate of the new messages.
-- **First request.** Nothing has been measured yet, so the whole context is
-  estimated: system prompt, tool definitions, and the messages.
-
-Estimation must be reasonable for non-ASCII text as well, so a conversation in
-Chinese or Japanese is not reported at a fraction of its real size. The estimate
-is allowed to be approximate; it drives a warning and the compaction decision,
-and the exact figure arrives one turn later. How the estimate is computed belongs
-to the technical design.
-
-What counts toward `used`:
-
-- the system prompt, including any context files appended to it;
-- the definitions of the enabled tools (they are sent with every request);
+- the system prompt, including context files;
+- the definitions of the enabled tools;
 - every message in the active context, including tool results;
-- the active summary after a compaction (§4.1).
+- the active summary after a compaction.
 
-`/clear` does not change it (it clears the visible transcript only, as it does
-today). `/new` resets it to the size of the system prompt and tool definitions.
-Switching or resuming a session recomputes it from the restored context (§6.1).
+Estimation is approximate and must remain reasonable for non-ASCII text. The
+exact figure arrives with the next response.
 
-### 3.5 The `/context` command
+`/clear` does not change the figure. `/new` resets it to the system prompt and
+tool definitions. Switching or resuming a session recomputes it from the restored
+context.
 
-`/context` prints a breakdown, so the figure in the footer is explainable:
+### 2.5 `/context`
+
+`/context` prints the breakdown and where each number came from:
 
 ```
 context
@@ -186,30 +98,15 @@ context
   last request  12,398 input + 214 output (measured)
 ```
 
-The breakdown is what makes the footer figure debuggable: a user who thinks the
-count is wrong can see which part is large, and whether the number is measured or
-estimated.
+The per-category numbers are estimates; the `used` line is the figure the footer
+shows. `/context summary` prints the text of the active summary.
 
-It is available in the terminal UI and the web console. `/context summary` prints
-the text of the active summary, if there is one, so the user can see exactly what
-the model was told about the compacted part of the conversation. `/context` and
-`/context summary` are commands of the two consoles, like `/session` and
-`/new`; they have no equivalent in print or JSON mode, where the same figures
-reach the caller on the event stream instead.
+## 3. Compaction
 
-The breakdown's categories are the ones the context is assembled from, not a new
-classification: system prompt (with context files), tool definitions, the summary
-(if any), and the messages after it. The per-category numbers are estimates; the
-`used` line is the same figure the footer shows, measured when the provider has
-reported one and estimated otherwise, so the categories can be a little off from
-it. The `last request` line is what the provider actually reported.
-
-## 4. Compaction
-
-### 4.1 What compaction does
+### 3.1 What it does
 
 Compaction takes the oldest part of the active conversation, asks the model to
-summarize it, and replaces it in the active context with:
+summarize it, and replaces that part in the active context with:
 
 ```
 [summary of the conversation so far]
@@ -217,336 +114,181 @@ summarize it, and replaces it in the active context with:
 [the most recent turns follow]
 ```
 
-The summary is produced by the same model, in a separate request that is not part
-of the conversation, and is inserted as one clearly labelled message. It takes
-the role of a user message, so the conversation it produces is always valid: the
-summary can never leave a tool call without its result, or a result without its
-call. The system prompt and the tool definitions are never compacted: they are
-the instructions, not the conversation.
+The summary is inserted as a user message, so the result is always a valid
+conversation: a tool call never loses its result and a result never loses its
+call. The system prompt and tool definitions are never compacted.
 
 The summarization request carries no tool definitions, so the model can only
-answer it with text — a summary cannot turn into a tool call, whatever the
-conversation it is summarizing contains. It uses the same retry policy as a
-normal turn (§4.7); it does not produce `retrying` notices of its own, so a
-retry of the summary is not mistaken for a retry of the user's turn.
+answer with text. It uses the normal retry policy but does not produce `retrying`
+notices of its own. It is not appended to the conversation and is billed like any
+other request.
 
-The summary request itself is sent again to the provider, so it is billed like
-any other request; it is not shown in the transcript, and it does not appear as
-an assistant message in the stored conversation.
+### 3.2 What is kept
 
-### 4.2 What is kept verbatim
+- The system prompt and context files.
+- The enabled tool definitions.
+- The most recent three user turns, with their assistant messages and tool
+  results.
+- A tool result in that tail may still be replaced by an
+  `[output omitted to fit the context window]` marker when the target cannot
+  otherwise be met; the compaction notification says when that happened.
 
-- The system prompt and any context files in it.
-- The definitions of the enabled tools.
-- The most recent turns, verbatim: the last 3 user turns with their assistant
-  messages and tool results. Three turns is the default and is not configurable
-  in this design; keeping the recent part exact is what makes the conversation
-  continue coherently, and a configurable tail would add a setting whose right
-  value is not obvious.
-- Within that tail, a tool result may still be shortened to an `output omitted`
-  marker when the target size cannot otherwise be met (§4.4). This is the one
-  exception to "verbatim", and the compaction notification says when it happened.
+Compaction never splits a unit: an assistant message that requested tools stays
+with the results that answered it. Everything older than the kept tail survives
+only in the summary.
 
-Nothing newer than the summary is lost. Nothing older than the kept tail survives
-except through the summary.
+### 3.3 What the summary contains
 
-Compaction never splits a unit: an assistant message that requested tools is
-always kept or summarized together with the tool results that answered it. A cut
-point is only chosen at a message boundary where the conversation is consistent
-(request, results, next request).
-
-### 4.3 What the summary must contain
-
-The summarization request instructs the model to produce a compact, factual
-summary that would let it continue the work without the original messages,
-covering:
+The summarization prompt asks for a compact, factual record of:
 
 - what the user asked for, including constraints and preferences;
-- decisions taken and the reasons for them;
-- files read, created, and modified, with their paths;
-- commands run and what they showed, including failures and how they were
-  resolved;
-- errors encountered and fixes applied;
-- the current state of the work, and what remains to be done;
-- anything the user asked to remember or to avoid.
+- decisions and their reasons;
+- files read, created, and modified, with paths;
+- commands run and what they showed, including failures and fixes;
+- errors encountered and how they were resolved;
+- the current state of the work and what remains;
+- anything the user asked to remember or avoid.
 
-The summary is explicitly labelled as a summary of earlier conversation, so the
-model does not mistake it for a user instruction or for current state. It must
-not invent progress that did not happen; a summary that claims work is finished
-when it is not is the main risk of this feature, and the prompt states that the
-summary is a record, not a plan.
+The summary is labelled as a record, not instructions, and must not claim work
+was completed when it was not. Repeated compaction subsumes the previous summary
+into a new one.
 
-Repeated compaction is allowed: compacting a context that already contains a
-summary produces one new summary that subsumes the old one. The label says how
-many messages the summary represents.
+### 3.4 Automatic compaction
 
-### 4.4 When compaction runs automatically
+Automatic compaction is on by default. Before each request in a run, the agent
+checks whether the projected context has reached the threshold:
 
-Automatic compaction is on by default. Before each request is sent in a run,
-the agent checks whether the projected context has reached the threshold:
+- threshold: **80%** of the window (`--compact-at <percent>` / `compact_at`);
+- the check runs once per request and never loops;
+- compaction never runs during a streamed answer or with a tool call
+  outstanding;
+- the target is **at most 50%** of the window, leaving room for several turns;
+- if the kept tail alone is larger than the target, its oldest tool results are
+  shortened until it fits;
+- if compaction cannot bring the context below the threshold, automatic
+  compaction is disabled for the rest of the session and one warning says so;
+  when there is nothing left to summarize, it is disabled without a warning;
+- `--no-auto-compact` / `auto_compact = false` turns the trigger off. The
+  indicator still warns and an oversized request fails with the provider's error;
+  manual `/compact` still works.
 
-- threshold = **80%** of the window (`--compact-at <percent>` / `compact_at`);
-- the check runs once before each request. If used is at or above the threshold
-  and automatic compaction is enabled, compaction runs, and then the request is
-  sent; the check never loops, so a run cannot stall trying to shrink itself.
-  Compaction never runs while a tool call is outstanding or in the middle of a
-  streamed answer: the check sits between turns, where the conversation is
-  consistent;
-- the summarized context is targeted at **at most 50%** of the window, so the
-  session has room for several more turns rather than compacting again
-  immediately; if the kept tail alone is larger than that, older tool results in
-  the tail are shortened (replaced with an `output omitted` marker) until the
-  target is met;
-- if compaction does not bring the context below the threshold — because the
-  system prompt and the tool definitions alone are large, or because the
-  summarizable part is tiny — further automatic compaction is disabled for the
-  rest of the session and one warning says so. The indicator keeps warning, and a
-  rejected request reports the provider's own error. Summarizing repeatedly for
-  no gain is worse than sending and failing once. When there is nothing left to
-  summarize at all (only the kept tail remains), automatic compaction is
-  disabled the same way but without a notice: nothing went wrong, there is
-  simply nothing to do.
+Automatic compaction applies in print and JSON runs as well as the console.
 
-Automatic compaction applies in every mode, including print and JSON, because it
-protects the run itself; the interfaces differ only in how they report it (§4.6).
-
-`--no-auto-compact` / `auto_compact = false` turns it off. With it off, the
-indicator still warns, and a request that exceeds the window fails with the
-provider's error plus advice to run `/compact` or `/new`. A manual `/compact`
-still works: turning off the automatic trigger is not the same as losing the
-ability to compact.
-
-### 4.5 The `/compact` command
+### 3.5 `/compact`
 
 ```
 /compact [instructions]
 ```
 
 - Compacts immediately when the console is idle.
-- Submitted while a run is in flight, it is **queued** after the current turn,
-  like a prompt: compaction needs a stable history, and aborting the user's work
-  to compact would be surprising. The queue holds the command, so it is never
-  sent to the model as a message.
-- The optional text guides the summary ("keep the API changes and the failing
-  test output"), and is passed to the summarization request as the user's
-  preference.
-- With too little conversation to summarize (only the kept tail remains), it
-  reports that there is nothing to compact and does nothing.
-- The command is available in the terminal UI and the web console. It is not a
-  mode or a flag: one-shot and JSON runs compact automatically when needed, and
-  have no command line to type into.
+- While a turn is in flight, the command is queued after the current turn; the
+  queue holds the command, so it is never sent as a prompt.
+- The optional text is passed to the summarization request as what to preserve.
+- With too little conversation to summarize, it reports that there is nothing to
+  compact and does nothing.
+- It is a console command only; print and JSON runs compact automatically.
 
-### 4.6 What the user sees
+### 3.6 What the user sees
 
-- **Before**: the footer shows `ctx 105k/128k 82%` in the error colour.
-- **During** an automatic compaction, the run status becomes `compacting…` with
-  the same spinner as a normal run; a prompt submitted then is queued as usual.
-- **After**, a transcript block records what happened:
+- Before: the footer shows the figure in the error colour at the threshold.
+- During an automatic compaction: status `compacting…`; a prompt submitted then
+  is queued.
+- After: a transcript block records the result:
 
   ```
-  ◆ context compacted
+  context compacted
     18 messages summarized · 105k → 24k tokens · the last 3 turns kept
   ```
 
-  The block is informational, not an error. When a tool result in the kept tail
-  had to be shortened to meet the target, the block says so
-  (`2 tool results shortened`). When automatic compaction has been switched off
-  for the rest of the session because compacting did not free enough of the
-  window, the block says that too, so a later request that fails is not a
-  surprise. The summary text itself is available with `/context summary`.
-- A manual `/compact` with nothing to summarize adds a block saying so; a manual
-  one that fails adds a block naming the failure and stating that the context is
-  unchanged.
-- The **visible transcript is not rewritten**: the messages that were summarized
-  stay on screen for the rest of the session. The transcript is the user's record
-  of what happened; compaction is a change to what the model is sent, not a
-  deletion of the conversation.
-- In **JSON mode**, compaction emits a `compaction` event carrying the number of
-  messages summarized, the token counts before and after, whether tool results
-  were shortened, and whether it was automatic or requested; the usage events
-  already on that stream carry the figures the indicator shows.
-- In **print mode**, a single notice goes to stderr, where tool activity already
-  goes, so stdout stays the answer alone.
+  The block also says when tool results were shortened, when automatic
+  compaction disabled itself, or why a compaction failed. The summary text is
+  available with `/context summary`.
+- A manual compaction with nothing to summarize, or one that fails, adds a block
+  saying so.
+- The visible transcript is not rewritten: the summarized messages stay on
+  screen. The transcript is the user's record; compaction changes only what the
+  model is sent.
+- In JSON mode, compaction emits a `compaction` event with the counts, token
+  figures, shortening and automatic/requested flag.
+- In print mode, one notice goes to stderr.
 
-### 4.7 Failure and interruption
+### 3.7 Failure and interruption
 
-- A compaction request uses the normal retry policy for transient provider
-  failures (`basic-functions` §2.6).
-- If summarization fails, the active context is left **unchanged** and the
-  failure is reported. An automatic compaction that fails does not block the run:
-  the request proceeds with the uncompacted context, and its own outcome is what
-  the user sees. A manual `/compact` reports the error and does nothing else.
-- If the summarization request itself would exceed the window, the conversation
-  is summarized in two or more parts (each part summarizing what came before it
-  plus its own slice, oldest first) and the results are combined into one
-  summary. This is the case where the context is already at the limit before
-  anything is compacted, so it is the path that must not fail.
-- Aborting (`esc`) during a compaction cancels it and leaves the context
-  unchanged. The transcript block for that attempt says the compaction was
-  cancelled, since the run's own failure notice is suppressed for an abort.
-- A compaction that is queued (a `/compact` submitted during a run) stays queued
-  with the conversation it was submitted in: opening another directory's
-  conversation, or `/new`, drops it, exactly as it drops queued prompts.
-- Compaction never runs while a tool call is outstanding, and never runs in the
-  middle of a streamed answer; the cut is always between turns.
+- A summarization failure leaves the active context unchanged and is reported.
+  An automatic failure does not block the run; the request proceeds with the
+  uncompacted context and its own outcome is what the user sees.
+- If the summarization input is larger than the window, the conversation is
+  summarized in parts, oldest first, each part carrying the running summary.
+- Aborting (`esc`) during an automatic compaction cancels it and leaves the
+  context unchanged; the block says the compaction was cancelled.
+- Opening another conversation or `/new` drops a queued compaction with the
+  conversation it belonged to.
+- Compaction never runs while a tool call is outstanding or mid-answer.
 
-## 5. Configuration
+## 4. Configuration
 
 | Setting | Flag | Config key | Default |
 |---|---|---|---|
-| Context window override | `--context-window <tokens>` | `context_window` | 0 = discover (§3.3) |
+| Context window override | `--context-window <tokens>` | `context_window` | 0 = discover |
 | Automatic compaction | `--auto-compact` / `--no-auto-compact` | `auto_compact` | on |
 | Threshold | `--compact-at <percent>` | `compact_at` | 80 |
 | Kept tail | — | — | 3 turns |
 | Summary target | — | — | 50% of the window |
 
-All of these resolve with the existing precedence (**flag > environment > config
-file > default**) and appear in `--show-config` with their source, like every
-other setting. `context_window` also accepts a size suffix (`128k`, `1m`) for
-convenience, since that is how model limits are usually written.
+All resolve with **flag > environment > config file > default** and appear in
+`--show-config` with their source. `context_window` accepts `128k`, `1m`, or a
+plain number. `context_window` must not be negative and `compact_at` must be
+between 1 and 100. No new environment variables are introduced.
 
-No new environment variables are introduced: these three settings are chosen once
-per session and belong in the config file, not in a shell profile. The existing
-`SAL_*` variables are unchanged.
+With `--no-session`, compaction still works but is not recorded, so it is lost
+when the process exits.
 
-With `--no-session`, compaction still works — it changes what is sent to the
-model, which is independent of whether the conversation is stored — but nothing
-is recorded, so a compaction cannot be seen again after the process exits.
+## 5. Interaction with existing behaviour
 
-Invalid values are rejected the way other settings are, naming the source:
-`context_window` must be positive, and `compact_at` must be between 1 and 100.
-A `compact_at` below 70 (the severity warning threshold) is accepted and simply
-means the indicator jumps from normal to critical, which is the user's choice to
-make.
+### 5.1 Sessions
 
-`--context-window` is also the escape hatch for a service whose real limit is
-larger than the built-in table assumes: setting it is always correct, whereas a
-wrong discovered limit is a guess.
+The stored conversation keeps every message. A compaction is recorded separately:
+the summary, the message it replaces, the number of messages covered, and the
+tool results it shortened. On resume the active context is reconstructed from the
+summary onwards. The rebuilt transcript shows the summary and the messages after
+it, not the summarized prefix.
 
-## 6. Interaction with existing behaviour
+### 5.2 `/clear` and `/new`
 
-### 6.1 Sessions
+`/clear` empties the visible transcript and touches neither the conversation nor
+the indicator. `/new` starts a fresh conversation: the indicator resets and no
+summary carries over. Opening another directory's conversation recomputes the
+limit and the used figure.
 
-The stored session log remains complete: compaction does not delete the messages
-it summarized, so the file still records the whole conversation and can be
-audited or read by other tools. A compaction is recorded as its own entry
-(summary text, the range of messages it replaces, token counts, time), and on
-resume the active context is reconstructed from the summary onwards — the same
-context the running console had. Storing the range as well as the text is what
-makes that reconstruction exact rather than inferred. The rest of the file stays
-on disk but is not sent to the model.
+### 5.3 Model switching
 
-Consequences:
+`/model <name>` changes the limit and therefore the percentage and threshold
+immediately. If the new window is smaller than the current context, the next
+request is preceded by an automatic compaction when enabled; with it disabled,
+the request is attempted and the provider's error is reported.
 
-- Resuming a compacted session does not restore the summarized messages into the
-  model's context; it restores the summary. This is what makes resuming survivable
-  for a long session.
-- The transcript rebuilt after a resume shows the summary and the messages after
-  it, and says how many earlier messages are in the file but not in the active
-  context. It does not replay the summarized messages.
+### 5.4 Context versus the stored log
 
-### 6.2 `/clear` and `/new`
+After a compaction the active context and the stored log differ by design. The
+footer and `/context` report the active context, never the log. The console says
+when this is the case rather than hiding it.
 
-- `/clear` empties the visible transcript and touches neither the conversation
-  nor the context indicator.
-- `/new` starts a fresh conversation and session; the indicator resets and no
-  summary carries over.
-- Opening another directory's conversation (`/new <path>`, `--dir`) aborts a run
-  in flight and recomputes both the limit (from the model in use) and the used
-  figure (from the restored context, marked `~` until the first response).
+### 5.5 Security and cost
 
-### 6.3 Model switching
+The summary is model output and has the same trust boundary as assistant text;
+prompt-injected content can survive into it. It is labelled as a summary, and
+`/context summary` shows the user the same text. Compaction is lossy: details the
+summary omits leave the model's context, though they remain stored. It sends part
+of the conversation to the provider a second time, at the moment the context is
+largest; one expensive request is the intended trade for continuing the session.
 
-`/model <name>` changes the limit and therefore the percentage and the
-auto-compaction threshold immediately. If the new window is smaller than the
-current context, the next request is preceded by an automatic compaction (if
-enabled); if compaction is disabled, the request is attempted and its failure is
-reported with the usual advice.
+## 6. Non-goals
 
-### 6.4 What "context" means versus what is stored
-
-Deliberately, the active context and the stored log can differ after a
-compaction: the log is complete, the context is what the model is sent. The
-footer and `/context` always report the active context, never the log. This is
-the one place where "what you see in the session" and "what the model sees" are
-not the same thing, and the interface says so rather than hiding it.
-
-### 6.5 Where the logic lives
-
-The feature is deliberately split so that nothing about it is interface-specific:
-
-- **What the model is sent** — the summary, the kept tail, the message boundary
-  — is decided in the agent loop, so every mode behaves the same way.
-- **The figures** — used, limit, percentage, whether they are measured or
-  estimated — are reported as part of the run's event stream, so the terminal
-  UI, the web console, and a JSON consumer all read the same numbers.
-- **The commands** (`/context`, `/compact`) belong to the two consoles, and are
-  thin wrappers over those two things.
-
-This is why the feature cannot be implemented in one front end: the loop has to
-know the limit, and the interfaces have to be told about it.
-
-### 6.6 Security and trust
-
-- The summary is model output and is subject to the same trust boundary as any
-  assistant text: it can be wrong, and prompt-injected content from a file that
-  was read earlier can survive into it. It is labelled as a summary, not as
-  instructions, so a model reading it is told what it is. `/context summary` shows
-  the user the same text, which is what makes the risk auditable rather than
-  hidden.
-- Compaction is lossy. Details the summary omits are gone from the model's
-  context for the rest of the session, although they remain in the stored conversation.
-- Compaction sends part of the conversation to the provider a second time, as a
-  summarization request; the privacy properties are those of any other request.
-
-### 6.7 Cost
-
-Compaction is an extra provider request, and therefore an extra cost, at the
-moment the context is largest. This is the intended trade: one expensive request
-now, in exchange for continuing the session. The indicator and the notification
-report what it saved.
-
-## 7. Non-goals
-
-Not part of this feature, and not to be added by implementing it:
-
-- **Exact tokenization.** No bundled tokenizer, no per-vendor token counting; the
-  figure is measured where the provider reports it and estimated elsewhere.
-- **A vendor matrix of model limits.** The built-in table is a convenience with a
-  conservative default, not a catalogue to maintain.
-- **Cross-session memory, retrieval, or vector storage.** Compaction summarizes
-  the current conversation; it does not create a knowledge base.
-- **Selective per-message pinning, editing, or re-fetching.** The user can guide
-  the summary with `/compact <instructions>`, and nothing more.
-- **Undo.** A compaction cannot be reversed within the active context; the
-  original messages remain readable in the stored conversation.
-- **Cost accounting.** Token counts are reported, as they are today; money is
-  not.
-- **Automatic model switching** to a larger-window model when the context fills.
-- **Rewriting the visible transcript** on compaction.
-
-## 8. What this changes in the existing documents
-
-Implementing this changes `design/features/basic-functions` in these places, and
-this document is the reference for the new text:
-
-- §2 (the agent loop) gains a *context window* part describing the threshold
-  check, and its retry policy is stated to cover the summarization request too.
-- §4.1 and §4.2 (the terminal and web footers) gain the context segment; the
-  §4.1 footer description currently ends with the turn count.
-- §5 (sessions) notes that a compacted session keeps its full log and resumes
-  from the summary.
-- §6.1 (slash commands) gains `/context` and `/compact`.
-- §6.3 (config file) gains `context_window`, `auto_compact`, and `compact_at`;
-  §6.4 (environment) is unchanged, as this feature adds no variables.
-- §9 (explicit non-features) drops "context-window tracking"; the remaining
-  exclusions stand, and this feature's own non-goals (§7 here) are added to that
-  list rather than left implicit.
-- The README gains the same surface: the footer description, the two commands,
-  the three settings, and a section on compaction; the CHANGELOG gets one entry.
-
-The technical side — how the limit is discovered and cached, how the estimate is
-computed and corrected, where the threshold check sits in the agent loop, how a
-compaction is represented in the stored conversation, and how the front ends
-render the new state — belongs to `design/technical/context-compaction`, which
-is written before the code that depends on it.
+- Exact tokenization or per-vendor token counting.
+- A vendor matrix of model limits.
+- Cross-session memory, retrieval, or vector storage.
+- Selective pinning, editing, or re-fetching of messages.
+- Undo of a compaction within the active context.
+- Cost accounting.
+- Automatic switching to a larger-window model.
+- Rewriting the visible transcript when compacting.

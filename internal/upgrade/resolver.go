@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -152,5 +153,13 @@ func newHTTPClient() *http.Client {
 	if pool := rootCAs(); pool != nil {
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool}
 	}
-	return &http.Client{Transport: transport}
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if !secureURL(req.URL) {
+				return fmt.Errorf("refusing redirect to %s", req.URL)
+			}
+			return nil
+		},
+	}
 }

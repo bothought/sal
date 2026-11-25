@@ -22,6 +22,18 @@ import (
 	"time"
 )
 
+func TestRedirectRequiresHTTPS(t *testing.T) {
+	client := newHTTPClient()
+	req, _ := http.NewRequest(http.MethodGet, "http://example.com/asset", nil)
+	if err := client.CheckRedirect(req, nil); err == nil {
+		t.Fatal("expected a non-HTTPS redirect to be refused")
+	}
+	req, _ = http.NewRequest(http.MethodGet, "https://example.com/asset", nil)
+	if err := client.CheckRedirect(req, nil); err != nil {
+		t.Fatalf("HTTPS redirect refused: %v", err)
+	}
+}
+
 func TestParseVersion(t *testing.T) {
 	tests := []struct {
 		in   string

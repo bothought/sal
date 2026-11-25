@@ -13,13 +13,14 @@ not sandbox it. Run sal only in directories you are willing to have modified,
 and reduce the surface when you can:
 
 - `--tools read,grep,find,ls` for read-only work, or `--print` for one-shot runs.
-- Leave `--web-addr` on its default `127.0.0.1`; the console authenticates every
-  request with the access token in its URL, which is what stops a page on another
-  origin from reaching the API through your browser's loopback access. The token
-  is reused from `$XDG_STATE_HOME/sal/web-token` (mode `0600`) so a restarted
-  process keeps serving pages that are already open; treat that file as a
-  credential, and prefer it over `--web-token`/`$SAL_WEB_TOKEN`, which pin a
-  value you have to keep secret yourself.
+- Leave `--web-addr` on its default `127.0.0.1`. Without a token, the console
+  accepts loopback clients but rejects cross-origin browser requests and
+  non-loopback `Host` headers, which is what stops a page on another origin from
+  driving the API through your browser's loopback access. Any local process or
+  user can still reach a tokenless console; treat it as a local shell.
+- Set `--web-token` or `$SAL_WEB_TOKEN` when the console must be reachable by
+  anything you do not trust. Every request then requires the token, including
+  loopback requests. Binding a non-loopback address without a token is refused.
 - Keep credentials in `api_key_env`/the environment rather than in a config file,
   and keep that file mode 600 (sal warns when it is group- or world-readable).
 
