@@ -6,16 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- **The terminal UI.** The browser console (`--web`) is the only interactive
+  interface. `bubbletea`, `bubbles` and `lipgloss` are no longer dependencies.
+  Plain `sal` now prints its answer and exits; `--web` is required for the
+  console. The undocumented `--mode text` value was removed.
+- **The persisted web token and the state directory.** Tokens are no longer
+  generated or stored in `$XDG_STATE_HOME/sal/web-token`.
+
 ### Changed
+
+- **Web authentication is optional on loopback.** With no `--web-token` or
+  `$SAL_WEB_TOKEN`, the console accepts local clients without a token, rejects
+  cross-origin browser requests and non-loopback hosts, and refuses to bind a
+  non-loopback address. An explicit token is still required on every request.
+- The design documents were shortened to behaviour and invariants; TUI-specific
+  material was removed.
 
 - **One conversation per directory.** A working directory now owns exactly one
   stored conversation and opening sal there continues it, so there is nothing to
-  list or switch between. Removed: `/switch`, `/sessions`, the terminal session
-  picker, the web console's session menu, `-c`/`--continue`, and
-  `--continue-all`. Added: `--new` (archive the stored conversation and start
-  over), `--dir <path>` (work on another directory's conversation), and
-  `/new [path]` in both consoles. `sal --list-sessions` still prints every
-  conversation on the machine, now by directory.
+  list or switch between. Removed: `/switch`, `/sessions`, the session picker,
+  `-c`/`--continue`, and `--continue-all`. Added: `--new` (archive the stored
+  conversation and start over), `--dir <path>` (work on another directory's
+  conversation), and `/new [path]` in the console. `sal --list-sessions` still
+  prints every conversation on the machine, now by directory.
 
 ### Storage in SQLite
 
@@ -34,7 +49,7 @@ All notable changes to this project are documented here. The format follows
 - Removed the per-session file layout and the machinery that guarded it:
   exclusive file creation, waiting for a concurrent writer's header, tolerating
   a truncated last line, and choosing the current file among timestamped ones.
-- `/new` now refuses to run while a turn is in flight in both consoles, instead
+- `/new` now refuses to run while a turn is in flight in the console, instead
   of only in the browser: the turn's messages belong to the conversation being
   archived.
 

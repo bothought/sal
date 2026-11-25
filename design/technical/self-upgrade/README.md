@@ -1,187 +1,105 @@
 # Self-upgrade
 
-This document is the technical description of the feature specified in
-`design/features/self-upgrade`: what the program is made of to upgrade itself,
-which part owns which decision, what flows between the parts, and the invariants
-the structure keeps. What the commands print and do is the feature document;
-the shape of the code inside a part is the code's own business.
+The technical design of `design/features/self-upgrade`: which parts an upgrade is
+made of, what each owns, and the invariants that keep a failure inert.
 
 ## 1. Shape
 
-Two things are added, and neither is part of the agent:
+Two pieces, neither part of the agent:
 
-- **A self-upgrade part**, a package of its own under `internal/`, responsible
-  for everything an upgrade needs: asking GitHub for the latest release,
-  choosing the asset for this machine, fetching and verifying it, unpacking the
-  binary, checking that it runs, and handing a verified file to the platform
-  replacement. It does not know about prompts, sessions, the terminal UI or the
-  web console, and nothing in the agent knows it exists.
-- **A command in the entry point**, which recognises the reserved first word,
-  parses the subcommand's own flags, builds the upgrade part with the real
-  filesystem, HTTP client and output stream, and reports the result. The entry
-  point stays the only place that wires parts together.
+- **The upgrade part** (`internal/upgrade`) asks GitHub for the latest release,
+  selects the asset, downloads and verifies it, unpacks the binary, checks that
+  it runs, and hands a verified file to platform replacement. It knows nothing
+  about prompts, sessions, or the web console.
+- **A subcommand in the entry point** recognises the reserved word, parses the
+  subcommand's flags, wires the part with the real filesystem, HTTP client and
+  output stream, and reports the result.
 
-The dependency direction stays a straight line: the entry point depends on the
-upgrade part, and the upgrade part depends on nothing else in the module. That
-is deliberate — an upgrade is meaningful even when the rest of the program is
-broken, and it must be testable without a provider, a session or a terminal.
+The upgrade part depends on nothing else in the module, so it works when the rest
+of the program does not and is testable without a provider, session or terminal.
 
-Three responsibilities are separated inside the part:
+Three responsibilities inside the part:
 
-- **Release discovery** owns the conversation with GitHub: which release is the
-  latest, and what it contains. It answers with a description of the release,
-  not with a binary.
-- **Asset handling** owns everything that turns a release description into a
-  verified file on the local filesystem: platform mapping, name matching,
-  download limits, HTTPS enforcement, checksum verification, archive extraction,
-  the test run, and temporary-file cleanup.
-- **Platform replacement** owns the one operation that differs between operating
-  systems: putting a verified file where the running binary lives, atomically,
-  while the process that is doing it is still running.
+- **Release discovery** talks to GitHub and returns a description of the latest
+  release, not a binary.
+- **Asset handling** turns that description into a verified file: platform
+  mapping, name matching, HTTPS, download limits, checksum verification,
+  extraction, the test run, and temporary-file cleanup.
+- **Platform replacement** puts the verified file where the running binary lives.
 
-The split exists because these three have different reasons to change — GitHub's
-API, the project's release naming, and the operating system's rules — and
-because only the last one needs per-platform code.
+## 2. Version
 
-## 2. Where the version comes from
+The installed version, in order: the release tag injected at link time, the
+module version from the build information, then the `dev` marker. A release
+build must never report `dev`; a development build must never claim a release
+version.
 
-The upgrade compares an installed version against a release version, so the
-installed version has to be trustworthy in every way sal is built:
-
-- a release build carries the tag it was built from, injected at link time by
-  the release pipeline;
-- a module install carries the module version the toolchain records in the
-  build information;
-- every other build reports an explicit development marker.
-
-The order is: injected version, then build information, then the development
-marker. This is an invariant: a release build must never report the marker, and
-a development build must never claim a release version. A version that is not
-semantic is never ordered against a release; the feature document says what the
-user sees in that case.
-
-Version comparison is a small part of its own inside the upgrade package, with
-no dependency, because it is the only piece of parsing on the critical path and
-the only one whose result decides whether anything is downloaded at all.
+A version that is not semantic is never ordered against a release. `--check`
+reports it as unorderable; an actual upgrade installs the latest release without
+a comparison.
 
 ## 3. Release discovery
 
-One request to the GitHub release API, for the latest non-draft,
-non-prerelease release of the project repository. The answer is reduced to the
-four things the rest of the upgrade needs: the tag, the release page URL, the
-asset names with their download URLs and sizes, and whether a checksum document
-is among them. Everything else GitHub returns is ignored, and no second API
-request is made: asset downloads are plain HTTPS file fetches, not API calls.
+One request to the GitHub release API for the latest non-draft, non-prerelease
+release. The answer is reduced to the tag, the release page URL, the asset names,
+URLs and sizes, and whether a checksum document exists. Asset downloads are plain
+HTTPS file fetches, not API calls.
 
-The repository and both HTTP base URLs are configuration of the part, not
-constants buried in the request code, so tests can point them at a local server
-without a network. The user-facing program always uses the real ones.
-
-Failures are classified where they happen, because the kind of failure decides
-the message and whether retrying is worth suggesting: unreachable network, rate
-limit, missing repository or release, and a malformed answer are distinct
-outcomes, and none of them is panicked on or mistaken for "no update".
+Failures are named where they happen: unreachable network, rate limit, missing
+release, or malformed answer. None is mistaken for “no update”.
 
 ## 4. Asset selection and download
 
-Selection is a pure function of the machine's operating system and
-architecture, the release's asset names, and the naming rule the release
-pipeline uses. Two properties matter:
+Selection is a pure function of the machine, the release's asset names, and the
+naming rule:
 
-- **The mapping is total or explicit.** Known platforms map to one archive form
-  (two names, one for each packaging format); Android is mapped to the Linux
-  archive; an unknown platform produces a named error instead of a guess. A
-  wrong guess would download a binary that cannot run, and the whole point of the
-  test run is to catch that before it lands — so the guess is not made at all.
-  Mapping Android onto Linux is safe only because of the resolver fallback
-  described below: the archive runs there, and what would otherwise break is
-  name resolution rather than execution.
-- **Matching is by suffix, not by an exact assembled name**, so a release that
-  changes the arrangement of the name around the platform does not break
-  installed copies. It must still match exactly one asset and a checksum entry;
-  zero or several are errors.
+- every supported platform maps to exactly one archive form;
+- Android maps to the Linux archive;
+- an unknown platform is a named error, not a guess;
+- matching is by suffix, so cosmetic changes around the platform in the asset
+  name do not break installed copies. Zero or several matches are errors.
 
-Downloading and verification are one step with a fixed order and fixed limits:
+Download and verification have a fixed order and limits:
 
 - HTTPS only, checked before the request and again after any redirect;
-- a bounded body and a bounded total time, so a stalled or endless response
-  cannot fill the disk or hang the command;
-- the file is written into the same directory as the target, so the final
-  replacement is a rename within one filesystem and never a cross-device copy;
-- the checksum is verified before anything is unpacked, against the release's
-  own checksum document, and a missing or ambiguous entry is an error rather
-  than a skip;
-- the archive is unpacked in memory or streamed, and the member is selected by
-  the platform's binary name, not by position.
+- bounded body and bounded total time;
+- the file is written beside the target, so replacement is a rename within one
+  filesystem;
+- the SHA-256 is verified against the release's checksum document before
+  anything is unpacked; a missing or ambiguous entry is an error;
+- the archive member is selected by the platform's binary name, not position.
 
-The test run before replacement is what makes "verified download" mean something
-stronger than "the checksum matched": it executes the extracted file with the
-plain version flag and requires the expected version. It is also the check that
-notices a target filesystem that does not permit execution. Because it runs
-before the replacement, its failure costs nothing but a temporary file — and
-because it runs a binary just fetched from the network, it is the one deliberate
-execution in the feature, documented rather than hidden.
+The test run executes the extracted file with the version flag and requires the
+expected version. It runs before replacement, so a failure costs only a temporary
+file, and it catches a target filesystem that does not permit execution. It is
+the one deliberate execution of downloaded code.
 
-All temporary state is created next to the target and removed on every exit
-path, including a cancellation. Cleanup is unconditional; it never masks the
-error that caused it.
+Temporary state lives beside the target and is removed on every exit path,
+including cancellation.
 
-### 4.1 Name resolution where the system file is absent
+### 4.1 Android and Termux
 
-The standard library's resolver reads one path, `/etc/resolv.conf`, and Android
-does not write it: DNS there is served by a system daemon, and Termux keeps the
-configuration under its own prefix. A program built for Android with the
-standard toolchain has the same blind spot as one built for Linux, so shipping a
-separate Android archive would not fix it — the difference between the two is in
-how the Termux toolchain is patched, which a release built on a normal machine
-does not inherit.
+The Go resolver reads `/etc/resolv.conf`, which Android does not write, and
+Termux keeps its CA bundle under its own prefix. When the system files are
+absent, the upgrade client reads the platform's resolver configuration and
+certificate bundle. The fallback is confined to the client and never runs when
+the system files exist.## 5. Platform replacement
 
-The upgrade part therefore carries the bridge: when the system resolver file is
-missing, it reads the name servers from the alternate location and gives the
-HTTP client a resolver that asks them. This is confined to the client the
-upgrade creates — it is not a global resolver change, and it never runs when the
-system file exists. It is the only place in the program that knows about a
-platform's DNS layout, and it exists because a self-upgrade has to reach the
-network before it can install anything that might fix a platform quirk.
+One operation: place a verified file where the running binary lives.
 
-The trust store has the same shape of problem and the same answer: the TLS stack
-reads the usual system locations, and Termux installs its bundle under its own
-prefix. The client therefore falls back to the platform bundle when no system
-bundle exists — and only then, so an ordinary host, and one whose environment
-names a bundle, keeps the standard behaviour.
+- **Locating the target:** the running executable with symbolic links resolved,
+  so a link on `PATH` survives and the invoked name does not change.
+- **Unix:** rename the verified file over the target. The running process keeps
+  the old inode; the target is never missing or truncated.
+- **Windows:** rename the running file aside, rename the new file into place, and
+  delete the old file on the next start, best effort. The move is retried briefly
+  because a scanner or indexer can hold the file.
+- **Failure is inert:** permissions, a read-only mount, or a `noexec` filesystem
+  leaves the installed binary in place and removes the verified copy. There is
+  no partial state and therefore no rollback.
 
-The same reasoning applies to the provider's client, which is why the fallback
-belongs to a shared helper rather than to the upgrade alone: an agent that cannot
-resolve a name, or cannot complete a handshake, is not useful on the device
-either. How the helper is wired into each client is the code's business.
-
-## 5. Platform replacement
-
-The part exposes one operation: given a verified file, put it where the running
-binary lives. Everything before that point is platform-independent.
-
-- **Locating the target.** The running executable's own path, with symbolic
-  links resolved, so a link on `PATH` is preserved and an upgrade does not
-  change the name the binary is invoked by.
-- **Unix-like systems** replace by renaming the verified file over the target:
-  the running process keeps the old inode, the new file appears atomically, and
-  no window exists in which the target is missing or truncated.
-- **Windows** cannot replace a running executable, so the running file is moved
-  aside and the new file is renamed into its place. The moved-aside file cannot
-  be deleted while the old process runs, so it is left behind and removed by
-  the next start of the program, best effort and silently. The replacement
-  retries briefly, because a virus scanner or an indexer can hold the file for a
-  moment, and a rename that succeeds is still atomic from the user's point of
-  view.
-- **Failure is inert.** Any error from the replacement — permissions, a
-  read-only mount, a filesystem without execute permission — leaves the
-  installed binary in place and removes the verified copy. There is no partial
-  state to recover from, which is why no rollback step exists.
-
-The platform files are selected by build tag, and the shared part never calls a
-platform-specific operation by a condition on the operating system; a build for
-an unsupported platform either fails to compile the replacement in, or answers
-with the "no asset" error before reaching it.
+Platform files are selected by build tag; the shared part never branches on the
+operating system.
 
 ## 6. Data flow
 
@@ -196,74 +114,55 @@ entry point ──▶ upgrade part ──▶ release discovery ──▶ HTTPS (
         │        asset handling ──▶ HTTPS (asset + checksums)
         │              │
         │              ▼
-        │        verified file in the target directory
+        │        verified file beside the target
         │              │
         │              ▼
         │        test run (version flag)
         │              │
         │              ▼
         │        platform replacement ──▶ target file
-        │              │
-        ▼              ▼
+        ▼
      report (stdout/stderr, exit status)
 ```
 
-`--check` stops after release discovery and version comparison; it never reaches
-asset handling. That is a structural guarantee, not a policy check: the check
-path has no access to the code that writes files.
-
-The upgrade part reports through an injected output stream and returns errors
-instead of exiting, so a test can read what the user would see and assert on the
-returned error without spawning a process.
+`--check` stops after discovery and comparison. It has no access to the code that
+writes files. The part reports through an injected output stream and returns
+errors instead of exiting, so tests can assert output and error without spawning
+a process.
 
 ## 7. Invariants
 
-- The installed binary is either untouched or fully replaced; a failure never
-  leaves a partial or missing binary in place.
-- Nothing outside the target file and the temporary files beside it is written;
-  configuration, sessions and the web token are never opened.
-- Every network request is HTTPS, and every byte that becomes a binary has a
-  verified checksum from the release it came from.
-- `--check` performs no filesystem writes and executes nothing it downloaded.
-- The command needs no credential, no configuration file and no terminal.
-- The upgrade never downgrades, never selects a prerelease, and never treats an
-  unorderable installed version as either older or newer.
-- The agent, the tools and both front ends are unaware of the feature: there is
-  no tool, no slash command and no event for it.
+- The installed binary is either untouched or fully replaced.
+- Nothing outside the target and its temporary files is written; configuration,
+  sessions and the web console are never opened.
+- Every network request is HTTPS, including redirects, and every byte that
+  becomes a binary has a checksum from its release.
+- `--check` writes nothing and executes nothing downloaded.
+- The command needs no credential, configuration file, or terminal.
+- It never downgrades, never selects a prerelease, and never orders an
+  unorderable installed version.
+- The agent, tools and console are unaware of the feature: no tool, slash
+  command, or event.
 
 ## 8. Release pipeline
 
-The feature is only usable if releases carry assets, so the pipeline is part of
-the design:
-
-- Tagging a release builds one static binary per supported platform and
-  architecture, with the version injected, and packages each in the archive form
-  the naming rule implies;
-- it publishes the archives, the checksum document, and nothing else that the
-  feature would depend on;
-- it builds for every platform in the selection table, so the table and the
-  pipeline cannot drift apart without a visible failure.
-
-The platform list lives in one place in the upgrade part and is mirrored by the
-pipeline's build matrix; a change to one without the other is a bug the feature
-document's platform table would show.
+Tagging a release builds one static binary per supported platform and
+architecture, injects the version, packages each in the archive form the naming
+rule implies, and publishes the archives and checksum document. The build matrix
+covers every platform in the selection table, so the table and the pipeline
+cannot drift apart silently.
 
 ## 9. Testing
 
-- **Version comparison** as a table: ordering, prereleases, the `v` prefix,
-  and the unorderable marker.
-- **Release discovery and asset selection against a local HTTP server**: every
-  platform in the table including the Android mapping, an unknown platform, a
-  release missing the checksum document, and zero or duplicate asset matches.
-- **Failure paths with the real filesystem in a temporary directory**: checksum
-  mismatch, wrong archive member, a test run that reports the wrong version, a
-  target directory that refuses the rename — each must leave the target's
-  content unchanged.
-- **Replacement on the host platform**: a file replaced in place, a symbolic
-  link whose target is replaced and whose link survives, and a read-only
-  directory reported as an error. These are written so they hold on every
-  platform in the target set, not just the one running the suite.
-- **The command itself** through the entry point against a local server, for
-  both `--check` and the no-update path, asserting output and exit status.
-- **Compilation of every supported platform** in CI, so the per-platform
-  replacement file and the platform table are always buildable.
+- Version comparison as a table: ordering, prereleases, the `v` prefix, and the
+  unorderable marker.
+- Release discovery and asset selection against a local HTTP server: every
+  platform, Android mapping, unknown platform, missing checksums, zero or
+  duplicate matches.
+- Failure paths with the real filesystem: checksum mismatch, wrong archive
+  member, wrong reported version, non-writable target; each leaves the target
+  unchanged.
+- Replacement on the host: in-place replacement, a symlink whose target is
+  replaced, and a read-only directory reported as an error.
+- The command through the entry point for `--check` and the no-update path.
+- Cross-compilation of every supported platform in CI.
