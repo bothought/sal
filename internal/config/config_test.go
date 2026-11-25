@@ -16,7 +16,7 @@ func withEnv(t *testing.T, home string, kv map[string]string) {
 	t.Setenv("HOME", home)
 	// Windows resolves the home directory from USERPROFILE, not HOME.
 	t.Setenv("USERPROFILE", home)
-	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "SAL_CONFIG", "SAL_SESSION_DIR"} {
+	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "SAL_CONFIG", "SAL_SESSION_DIR"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -36,20 +36,15 @@ func TestResolveDefaultsToDotPaths(t *testing.T) {
 	if want := filepath.Join(home, ".local", "share", "sal", "sessions"); p.SessionDir != want {
 		t.Fatalf("SessionDir = %s, want %s", p.SessionDir, want)
 	}
-	if want := filepath.Join(home, ".local", "state", "sal"); p.StateDir != want {
-		t.Fatalf("StateDir = %s, want %s", p.StateDir, want)
-	}
 }
 
 func TestResolveHonorsXDGVariables(t *testing.T) {
 	home := t.TempDir()
 	cfgHome := filepath.Join(home, "xdg-config")
 	dataHome := filepath.Join(home, "xdg-data")
-	stateHome := filepath.Join(home, "xdg-state")
 	withEnv(t, home, map[string]string{
 		"XDG_CONFIG_HOME": cfgHome,
 		"XDG_DATA_HOME":   dataHome,
-		"XDG_STATE_HOME":  stateHome,
 	})
 
 	p := Resolve()
@@ -61,9 +56,6 @@ func TestResolveHonorsXDGVariables(t *testing.T) {
 	}
 	if p.SessionDir != filepath.Join(dataHome, "sal", "sessions") {
 		t.Fatalf("SessionDir = %s", p.SessionDir)
-	}
-	if p.StateDir != filepath.Join(stateHome, "sal") {
-		t.Fatalf("StateDir = %s", p.StateDir)
 	}
 }
 

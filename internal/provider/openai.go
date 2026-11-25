@@ -145,7 +145,7 @@ func firstEnv(keys ...string) string {
 func (o *OpenAI) Name() string      { return "openai-compatible" }
 func (o *OpenAI) ModelName() string { return o.Model }
 
-// SetModelName switches the model at runtime (TUI /model).
+// SetModelName switches the model at runtime (console /model).
 func (o *OpenAI) SetModelName(m string) {
 	o.Model = m
 	// The cached context window belongs to the previous model.

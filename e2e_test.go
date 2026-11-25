@@ -400,6 +400,9 @@ func TestParseArgs(t *testing.T) {
 	if _, _, err := parseArgs([]string{"--mode", "yaml"}); err == nil {
 		t.Fatal("expected an error for an unknown mode")
 	}
+	if _, _, err := parseArgs([]string{"--mode", "text"}); err == nil {
+		t.Fatal("expected an error for the removed text mode")
+	}
 
 	// an unsupported provider is rejected after resolution, not during parsing
 	o, _, err = parseArgs([]string{"--provider", "anthropic"})

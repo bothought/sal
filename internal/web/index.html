@@ -162,9 +162,8 @@
   var params = new URLSearchParams(location.search);
   var token = params.get("token") || "";
   // The URL carries the session this tab belongs to, so reloading the page (or
-  // reopening it from history) restores the same conversation. It is kept in
-  // the address bar on purpose: the token is persisted by the server, so the
-  // page keeps working across a restart without being reopened.
+  // reopening it from history) restores the same conversation. A token is
+  // optional: the server includes one only when it was configured.
   var urlSession = params.get("session") || "";
 
   var transcript = document.getElementById("transcript");
@@ -186,9 +185,11 @@
   var openTool = -1;
 
   function api(path, body) {
+    var headers = { "Content-Type": "application/json" };
+    if (token) headers["X-Sal-Token"] = token;
     return fetch(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Sal-Token": token },
+      headers: headers,
       body: JSON.stringify(body || {})
     }).then(function (resp) {
       return resp.json().catch(function () { return {}; }).then(function (data) {
@@ -486,7 +487,9 @@
   }
 
   function connect() {
-    var es = new EventSource("/api/events?token=" + encodeURIComponent(token));
+    var url = "/api/events";
+    if (token) url += "?token=" + encodeURIComponent(token);
+    var es = new EventSource(url);
     es.onmessage = function (e) {
       var ev;
       try { ev = JSON.parse(e.data); } catch (err) { return; }

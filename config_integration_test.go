@@ -24,7 +24,6 @@ func isolateXDG(t *testing.T) (home, cfgHome, dataHome string) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", cfgHome)
 	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
 	for _, k := range []string{"SAL_CONFIG", "SAL_SESSION_DIR", "SAL_MODEL", "SAL_BASE_URL", "SAL_API_KEY", "OPENAI_MODEL", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENCODE_GO_API_KEY", "NAMED_KEY"} {
 		os.Unsetenv(k)
 		t.Setenv(k, "")

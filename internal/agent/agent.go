@@ -109,7 +109,7 @@ type ContextLimiter interface {
 }
 
 // ModelSetter is implemented by providers that let the model be switched at
-// runtime (used by the TUI's /model command).
+// runtime (used by the console's /model command).
 type ModelSetter interface{ SetModelName(string) }
 
 // SessionIDSetter is implemented by providers that accept a session affinity
@@ -124,8 +124,8 @@ type ToolResult struct {
 	DurationMS int64  `json:"durationMs"`
 }
 
-// Event is what the agent reports while running. The TUI and print/JSON modes
-// subscribe to these.
+// Event is what the agent reports while running. The web console and
+// print/JSON modes subscribe to these.
 type Event struct {
 	Type     string      `json:"type"`
 	Text     string      `json:"text,omitempty"`
@@ -320,7 +320,7 @@ func (a *Agent) Messages() []Message {
 	return out
 }
 
-// Reset clears the conversation history (TUI /new).
+// Reset clears the conversation history (console /new).
 func (a *Agent) Reset() {
 	a.History = nil
 	a.compaction = nil

@@ -5,11 +5,10 @@
 //
 //	$XDG_CONFIG_HOME/sal/config.toml   (or config.json)   user configuration
 //	$XDG_DATA_HOME/sal/sessions/                          session files
-//	$XDG_STATE_HOME/sal/web-token                         web console token
 //
-// XDG_CONFIG_HOME defaults to ~/.config, XDG_DATA_HOME to ~/.local/share and
-// XDG_STATE_HOME to ~/.local/state. Relative values in those variables are
-// ignored, as the specification requires.
+// XDG_CONFIG_HOME defaults to ~/.config and XDG_DATA_HOME to ~/.local/share.
+// Relative values in those variables are ignored, as the specification
+// requires.
 package config
 
 import (
@@ -27,7 +26,6 @@ import (
 type Paths struct {
 	ConfigDir string // $XDG_CONFIG_HOME/sal
 	DataDir   string // $XDG_DATA_HOME/sal
-	StateDir  string // $XDG_STATE_HOME/sal
 	// SessionDir is the XDG location for session files.
 	SessionDir string
 }
@@ -40,11 +38,9 @@ func Resolve() Paths {
 	}
 	cfgHome := xdgPath("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	dataHome := xdgPath("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
-	stateHome := xdgPath("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	return Paths{
 		ConfigDir:  filepath.Join(cfgHome, "sal"),
 		DataDir:    filepath.Join(dataHome, "sal"),
-		StateDir:   filepath.Join(stateHome, "sal"),
 		SessionDir: filepath.Join(dataHome, "sal", "sessions"),
 	}
 }

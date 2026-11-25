@@ -8,9 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -462,7 +459,7 @@ func TestAbortWhenIdleIsANoop(t *testing.T) {
 }
 
 func TestAuthRejectsWrongOrMissingToken(t *testing.T) {
-	srv := newTestServer(t, &fakeAgent{})
+	srv := newTestServer(t, &fakeAgent{}, func(o *Options) { o.Token = "secret" })
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -489,13 +486,22 @@ func TestAuthRejectsWrongOrMissingToken(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("wrong token = %d, want 403", resp.StatusCode)
 	}
+
+	resp, err = http.Get(ts.URL + "/?token=secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("correct token = %d, want 200", resp.StatusCode)
+	}
 }
 
-func TestIndexServesTheConsoleWithToken(t *testing.T) {
+func TestIndexServesTheConsoleWithoutAToken(t *testing.T) {
 	srv := newTestServer(t, &fakeAgent{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/?token=" + srv.Token())
+	resp, err := http.Get(ts.URL + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,64 +611,124 @@ func TestURLRewritesWildcardHost(t *testing.T) {
 		{":7000", "http://127.0.0.1:7000/"},
 	} {
 		got := srv.URL(tc.addr)
-		if !strings.HasPrefix(got, tc.want) {
-			t.Fatalf("URL(%q) = %q, want prefix %q", tc.addr, got, tc.want)
-		}
-		if !strings.HasSuffix(got, "?token="+srv.Token()) {
-			t.Fatalf("URL(%q) = %q, want the access token appended", tc.addr, got)
+		if got != tc.want {
+			t.Fatalf("URL(%q) = %q, want %q", tc.addr, got, tc.want)
 		}
 	}
 }
 
-// ---- token persistence and session ownership -------------------------------
-
-func TestTokenFileIsCreatedAndReused(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "web-token")
-
-	first := New(Options{Agent: &fakeAgent{}, TokenFile: path})
-	if len(first.Token()) < 16 {
-		t.Fatalf("token = %q, want a generated token", first.Token())
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("token file was not written: %v", err)
-	}
-	// The mode is only meaningful where the platform keeps POSIX permissions;
-	// Windows reports a fixed mode for every file, so asserting it there would
-	// test the host and not the program.
-	if perm, ok := posixFileMode(path); ok && perm != 0o600 {
-		t.Fatalf("token file mode = %04o, want 0600", perm)
-	}
-
-	// a second process reuses the stored token, which is what keeps an already
-	// open page working across a restart
-	second := New(Options{Agent: &fakeAgent{}, TokenFile: path})
-	if second.Token() != first.Token() {
-		t.Fatalf("token was not reused: %q then %q", first.Token(), second.Token())
-	}
-
-	// an explicit token wins over the file
-	third := New(Options{Agent: &fakeAgent{}, Token: "explicit-token", TokenFile: path})
-	if third.Token() != "explicit-token" {
-		t.Fatalf("explicit token = %q", third.Token())
-	}
-
-	// without a token file, every server gets a fresh token
-	random := New(Options{Agent: &fakeAgent{}})
-	if random.Token() == first.Token() {
-		t.Fatal("expected an independent in-memory token")
-	}
-}
+// ---- session ownership -----------------------------------------------------
 
 func TestURLCarriesTheSessionID(t *testing.T) {
 	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
 		o.SessionID = func() string { return "abcdef1234567890" }
 	})
 	got := srv.URL("0.0.0.0:8080")
-	want := "http://127.0.0.1:8080/?token=" + srv.Token() + "&session=abcdef1234567890"
+	want := "http://127.0.0.1:8080/?session=abcdef1234567890"
 	if got != want {
 		t.Fatalf("URL = %q, want %q", got, want)
 	}
 }
+
+func TestURLIncludesAnExplicitToken(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
+		o.Token = "secret"
+		o.SessionID = func() string { return "abcdef1234567890" }
+	})
+	got := srv.URL("127.0.0.1:9000")
+	want := "http://127.0.0.1:9000/?token=secret&session=abcdef1234567890"
+	if got != want {
+		t.Fatalf("URL = %q, want %q", got, want)
+	}
+}
+
+func TestNoTokenAllowsLoopbackOnly(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{})
+	handler := srv.Handler()
+	for _, tc := range []struct {
+		name       string
+		remoteAddr string
+		host       string
+		want       int
+	}{
+		{"loopback", "127.0.0.1:1234", "127.0.0.1:8080", http.StatusOK},
+		{"ipv6 loopback", "[::1]:1234", "[::1]:8080", http.StatusOK},
+		{"non-loopback", "203.0.113.5:1234", "203.0.113.5:8080", http.StatusForbidden},
+		{"forged host", "127.0.0.1:1234", "evil.example:8080", http.StatusForbidden},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "http://"+tc.host+"/api/state", nil)
+		req.RemoteAddr = tc.remoteAddr
+		req.Host = tc.host
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Fatalf("%s = %d, want %d", tc.name, rec.Code, tc.want)
+		}
+	}
+}
+
+func TestNoTokenRejectsCrossOriginRequests(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{})
+	handler := srv.Handler()
+	for _, tc := range []struct {
+		name   string
+		origin string
+		site   string
+		want   int
+	}{
+		{"same origin", "http://127.0.0.1:8080", "same-origin", http.StatusOK},
+		{"another origin", "http://evil.example", "", http.StatusForbidden},
+		{"cross site", "", "cross-site", http.StatusForbidden},
+		{"same site", "", "same-site", http.StatusForbidden},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/state", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		if tc.origin != "" {
+			req.Header.Set("Origin", tc.origin)
+		}
+		if tc.site != "" {
+			req.Header.Set("Sec-Fetch-Site", tc.site)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Fatalf("%s = %d, want %d", tc.name, rec.Code, tc.want)
+		}
+	}
+}
+
+func TestConfiguredTokenIsRequiredOnLoopback(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{}, func(o *Options) { o.Token = "secret" })
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("without token = %d, want 403", resp.StatusCode)
+	}
+
+	resp, err = http.Get(ts.URL + "/api/state?token=secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("with token = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestListenRefusesNetworkBindWithoutToken(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{})
+	if err := srv.ListenAndServe(context.Background(), "0.0.0.0:0"); err == nil {
+		t.Fatal("expected a non-loopback bind without a token to be refused")
+	}
+}
+
+// ---- session ownership -----------------------------------------------------
 
 func TestStoredConversationIsRestoredIntoTheTranscript(t *testing.T) {
 	ag := &fakeAgent{}
@@ -831,6 +897,7 @@ func TestOpenSessionEndpointReportsFailure(t *testing.T) {
 
 func TestSessionEndpointsRequireToken(t *testing.T) {
 	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
+		o.Token = "secret"
 		o.SessionID = func() string { return "aaaa000011112222" }
 		o.OpenSession = func(string) (string, error) { return "", nil }
 	})
@@ -1138,7 +1205,7 @@ func TestCompactEndpointQueuesWhileRunning(t *testing.T) {
 
 func TestCompactEndpointRequiresToken(t *testing.T) {
 	fa := &fakeAgent{}
-	srv := newTestServer(t, fa)
+	srv := newTestServer(t, fa, func(o *Options) { o.Token = "secret" })
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1307,7 +1374,7 @@ func TestQueuedCompactionIsDroppedByASessionSwitch(t *testing.T) {
 }
 
 // TestCompactionBlockReportsTheKeptTurns pins the notification's figures in the
-// console as well as the terminal.
+// console.
 func TestCompactionBlockReportsTheKeptTurns(t *testing.T) {
 	body := compactionBody(agent.CompactionInfo{
 		Messages: 9, Before: 105000, After: 24000, KeptTurns: 2, Automatic: true,
@@ -1315,18 +1382,4 @@ func TestCompactionBlockReportsTheKeptTurns(t *testing.T) {
 	if !strings.Contains(body, "the 2 most recent turns kept") {
 		t.Fatalf("the block should report the turns it kept: %q", body)
 	}
-}
-
-// posixFileMode reports a file's permission bits, and whether the host's
-// filesystem actually carries them. Windows does not, so a test must not read
-// the number there.
-func posixFileMode(path string) (os.FileMode, bool) {
-	if runtime.GOOS == "windows" {
-		return 0, false
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0, false
-	}
-	return st.Mode().Perm(), true
 }
