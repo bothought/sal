@@ -95,8 +95,12 @@ Authentication is optional and defaults to local trust:
   Cross-origin browser requests and non-loopback `Host` headers are refused.
 - `--web-token` or `$SAL_WEB_TOKEN` sets an explicit token. Every request must
   then present it, including loopback requests.
-- Binding a non-loopback address without a token is refused. There is no default
-  token file and no persisted secret.
+- `--no-web-auth` disables built-in authentication entirely. The console accepts
+  every request, on any listen address, without a token or origin check; it is
+  intended for a deployment behind a trusted forward-auth proxy. An explicit
+  token is ignored in this mode.
+- Binding a non-loopback address without a token is refused unless
+  `--no-web-auth` is set. There is no default token file and no persisted secret.
 
 The console is built to be reloaded while the agent works. Every connection
 starts from a full snapshot; the session id stays in the URL, so a reload rebuilds
@@ -242,7 +246,8 @@ output is untrusted input: prompt injection from a file sal reads can request
 arbitrary commands. Use `--tools` to drop `bash`/`write`/`edit` for read-only
 work. The console binds to loopback by default; without a token it accepts local
 clients but refuses cross-origin browser requests and non-loopback hosts.
-Binding a non-loopback address requires a token.
+Binding a non-loopback address requires a token, unless `--no-web-auth` disables
+authentication for a deployment behind a trusted forward-auth proxy.
 
 ## 8. Explicit non-features
 
