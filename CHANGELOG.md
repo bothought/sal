@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-26
+
 ### Added
 
 - **`--no-web-auth`.** Disables web authentication and the loopback/host/origin
@@ -217,7 +219,8 @@ First release.
   `--append-system-prompt`, and per-conversation session headers for gateways
   that route agent traffic.
 
-[Unreleased]: https://github.com/bothought/sal/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bothought/sal/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/bothought/sal/releases/tag/v0.2.1
 [0.2.0]: https://github.com/bothought/sal/releases/tag/v0.2.0
 [0.1.5]: https://github.com/bothought/sal/releases/tag/v0.1.5
 [0.1.4]: https://github.com/bothought/sal/releases/tag/v0.1.4

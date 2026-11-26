@@ -70,7 +70,7 @@ every setting:
 
 ```
 $ sal --show-config
-sal 0.2.0
+sal 0.2.1
 
 paths:
   config file   ~/.config/sal/config.toml
