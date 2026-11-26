@@ -404,6 +404,14 @@ func TestParseArgs(t *testing.T) {
 		t.Fatal("expected an error for the removed text mode")
 	}
 
+	o, _, err = parseArgs([]string{"--web", "--no-web-auth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !o.web || !o.noWebAuth {
+		t.Fatalf("web flags not parsed: %+v", o)
+	}
+
 	// an unsupported provider is rejected after resolution, not during parsing
 	o, _, err = parseArgs([]string{"--provider", "anthropic"})
 	if err != nil {

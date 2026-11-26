@@ -189,6 +189,7 @@ sal --mode json "inspect this repo"   # JSONL event stream
 sal --dir ~/src/other --web           # another directory's conversation
 sal --new --web                       # start this directory over
 sal --tools read,grep,find,ls -p "audit this repo"   # read-only run
+sal --web --web-addr 0.0.0.0:8080 --no-web-auth  # behind a trusted proxy
 ```
 
 Print mode is the default when neither `--web` nor `--mode json` is selected.
@@ -244,6 +245,11 @@ must present it. Without a token, the console accepts local clients on loopback;
 cross-origin browser requests and forged `Host` headers are refused, which keeps
 a page on another origin from driving the agent. Binding a non-loopback address
 requires a token.
+
+For a deployment behind a trusted forward-auth proxy, `--no-web-auth` disables
+built-in authentication entirely: every request is accepted on any listen
+address, and `--web-token`/`$SAL_WEB_TOKEN` are ignored. Only use it when the
+proxy really is the gate.
 
 The page is served from the binary, so there is no build step and no extra files.
 The transcript shows user turns, streamed assistant text, each tool call with its
@@ -389,6 +395,10 @@ rejected; binding a non-loopback address requires `--web-token` or
 `$SAL_WEB_TOKEN`. Without a token, any local process or user can reach the
 console — treat its API as you would a local shell. A token is strongly
 recommended whenever the console is reachable by anything you do not trust.
+
+`--no-web-auth` removes the built-in authentication and host/origin checks
+completely, including on a network address. It is only safe behind a trusted
+forward-auth proxy; anything that can reach the listener can drive the agent.
 
 Report vulnerabilities privately rather than in a public issue — see
 [SECURITY.md](SECURITY.md).

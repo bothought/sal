@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`--no-web-auth`.** Disables web authentication and the loopback/host/origin
+  checks entirely, for deployments behind a trusted forward-auth proxy. It
+  permits any listen address; an explicit token is ignored.
+
 ## [0.2.0] - 2026-11-25
 
 ### Removed

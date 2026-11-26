@@ -21,6 +21,10 @@ and reduce the surface when you can:
 - Set `--web-token` or `$SAL_WEB_TOKEN` when the console must be reachable by
   anything you do not trust. Every request then requires the token, including
   loopback requests. Binding a non-loopback address without a token is refused.
+- `--no-web-auth` disables authentication and host/origin checks entirely, for a
+  deployment behind a trusted forward-auth proxy. Anything that can reach the
+  listener can drive the agent; do not expose it directly to an untrusted
+  network.
 - Keep credentials in `api_key_env`/the environment rather than in a config file,
   and keep that file mode 600 (sal warns when it is group- or world-readable).
 

@@ -155,7 +155,9 @@ The console is an HTTP server with a single embedded page.
   reported.
 - **Auth.** A configured token is required everywhere. Without one, the console
   accepts loopback clients only, rejects cross-origin browser requests and
-  non-loopback hosts, and refuses a non-loopback bind.
+  non-loopback hosts, and refuses a non-loopback bind. `--no-web-auth` disables
+  all of that for a deployment behind a trusted forward-auth proxy, and permits
+  any bind address.
 - **Switching conversation** aborts the run in flight, waits for it to finish,
   swaps the session, and rebuilds the transcript. The page keeps the session id
   in its URL.

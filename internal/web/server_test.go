@@ -667,6 +667,51 @@ func TestNoTokenAllowsLoopbackOnly(t *testing.T) {
 	}
 }
 
+func TestNoAuthAllowsAnyClient(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{}, func(o *Options) { o.NoAuth = true })
+	handler := srv.Handler()
+	req := httptest.NewRequest(http.MethodGet, "http://evil.example/api/state", nil)
+	req.RemoteAddr = "203.0.113.5:1234"
+	req.Host = "evil.example"
+	req.Header.Set("Origin", "http://evil.example")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestNoAuthIgnoresAnExplicitToken(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{}, func(o *Options) {
+		o.NoAuth = true
+		o.Token = "secret"
+	})
+	if srv.Token() != "" {
+		t.Fatalf("token = %q, want none", srv.Token())
+	}
+	if got := srv.URL("127.0.0.1:8080"); got != "http://127.0.0.1:8080/" {
+		t.Fatalf("URL = %q", got)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestNoAuthAllowsNetworkBind(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{}, func(o *Options) { o.NoAuth = true })
+	if err := srv.validateListen("0.0.0.0:8080"); err != nil {
+		t.Fatalf("network bind refused: %v", err)
+	}
+}
+
 func TestNoTokenRejectsCrossOriginRequests(t *testing.T) {
 	srv := newTestServer(t, &fakeAgent{})
 	handler := srv.Handler()
@@ -725,6 +770,13 @@ func TestListenRefusesNetworkBindWithoutToken(t *testing.T) {
 	srv := newTestServer(t, &fakeAgent{})
 	if err := srv.ListenAndServe(context.Background(), "0.0.0.0:0"); err == nil {
 		t.Fatal("expected a non-loopback bind without a token to be refused")
+	}
+}
+
+func TestTokenAllowsNetworkBind(t *testing.T) {
+	srv := newTestServer(t, &fakeAgent{}, func(o *Options) { o.Token = "secret" })
+	if err := srv.validateListen("0.0.0.0:8080"); err != nil {
+		t.Fatalf("token-protected network bind refused: %v", err)
 	}
 }
 
